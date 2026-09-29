@@ -3,6 +3,7 @@ import {
   getAuth,
   signInWithPopup,
   signInWithRedirect,
+  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
   User,
@@ -25,10 +26,33 @@ let isSigningIn = false;
 // Cache the access token in memory only (never in localStorage or sessionStorage).
 let cachedAccessToken: string | null = null;
 
+export const checkRedirectResult = async (): Promise<{
+  user?: User;
+  accessToken?: string;
+  errorMessage?: string;
+} | null> => {
+  try {
+    const result = await getRedirectResult(auth);
+    if (!result) return null;
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (!credential?.accessToken) return null;
+    cachedAccessToken = credential.accessToken;
+    return { user: result.user, accessToken: cachedAccessToken };
+  } catch {
+    return { errorMessage: 'Error al procesar el resultado de autenticación de Google.' };
+  }
+};
+
 export const initGoogleAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
 ) => {
+  checkRedirectResult().then((res) => {
+    if (res && res.user && res.accessToken && onAuthSuccess) {
+      onAuthSuccess(res.user, res.accessToken);
+    }
+  });
+
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
       if (cachedAccessToken) {

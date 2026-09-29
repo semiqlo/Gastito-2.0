@@ -1,6 +1,7 @@
 import {
   AppDatabaseState,
   ObligationStatus,
+  RecurringObligation,
   TransactionType,
 } from '../domain/models';
 import { formatMoney, getTodayLocalDate, triggerHaptic } from '../data/localRepository';
@@ -37,7 +38,6 @@ function markNotified(tag: string): void {
   try {
     const set = getNotifiedSet();
     set.add(tag);
-    // Mantener solo los últimos 200 tags para evitar crecimiento excesivo
     const arr = Array.from(set);
     if (arr.length > 200) {
       arr.splice(0, arr.length - 200);
@@ -49,7 +49,91 @@ function markNotified(tag: string): void {
 }
 
 /**
- * Obtiene el estado actual del permiso nativo de notificaciones del navegador / sistema operativo / Capacitor.
+ * Genera un ID numérico determinístico a partir del ID alfanumérico de la obligación (para Capacitor Local Notifications).
+ */
+export function getDeterministicNotificationId(obligationId: string): number {
+  let hash = 0;
+  for (let i = 0; i < obligationId.length; i++) {
+    hash = (hash << 5) - hash + obligationId.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash) % 2147483647;
+}
+
+/**
+ * Crea el canal de notificaciones de Android con alta importancia, sonido y vibración.
+ */
+export async function createGastitoNotificationChannel(): Promise<void> {
+  try {
+    await LocalNotifications.createChannel({
+      id: 'gastito_reminders',
+      name: 'Recordatorios y Pagos Gastito',
+      description: 'Canal para vencimientos, presupuestos y recordatorios de pagos',
+      importance: 5, // High
+      visibility: 1, // Public
+      sound: 'default',
+      vibration: true,
+    });
+  } catch {
+    // Entorno web puro sin plugin de Capacitor
+  }
+}
+
+/**
+ * Inicializa el listener de clics en notificaciones de Capacitor para navegar a la sección correspondiente.
+ */
+export function initCapacitorNotificationActionListener(): void {
+  try {
+    LocalNotifications.addListener('localNotificationActionPerformed', (notification) => {
+      const extra = notification.notification.extra;
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('gastito-navigate-tab', {
+            detail: { tab: 'RESUMEN', subSection: 'RECURRING', extra },
+          })
+        );
+      }
+    });
+  } catch {
+    // Ignore if not in Capacitor native environment
+  }
+}
+
+/**
+ * Comprueba los permisos de notificaciones exactas en Android 12+/13+.
+ */
+export async function checkAndroidExactAlarmSettings() {
+  try {
+    return await LocalNotifications.checkPermissions();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verifica el estado del ajuste de notificaciones exactas.
+ */
+export async function checkExactNotificationSetting() {
+  try {
+    return await LocalNotifications.checkPermissions();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Solicita habilitar notificaciones exactas.
+ */
+export async function changeExactNotificationSetting() {
+  try {
+    return await LocalNotifications.requestPermissions();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Obtiene el estado actual del permiso nativo de notificaciones.
  */
 export function getNativeNotificationPermission(): NativePermissionState {
   if (typeof window === 'undefined') {
@@ -62,13 +146,13 @@ export function getNativeNotificationPermission(): NativePermissionState {
 }
 
 /**
- * Solicita explícitamente permiso nativo al usuario tanto en Web como en Capacitor Android.
+ * Solicita explícitamente permiso nativo al usuario.
  */
 export async function requestNativeNotificationPermission(): Promise<NativePermissionState> {
   try {
-    // Solicitar permiso de Capacitor Local Notifications
     const capRes = await LocalNotifications.requestPermissions();
     if (capRes.display === 'granted') {
+      await createGastitoNotificationChannel();
       return 'granted';
     }
   } catch {
@@ -90,35 +174,99 @@ export async function requestNativeNotificationPermission(): Promise<NativePermi
 }
 
 /**
- * Programa una notificación local en Capacitor para que aparezca en el dispositivo incluso con la app cerrada.
+ * Programa una notificación local en Capacitor para una obligación en su fecha de vencimiento a las 09:00 AM.
  */
-export async function scheduleCapacitorNotification(options: {
-  id: number;
-  title: string;
-  body: string;
-  scheduleAt: Date;
-  tag?: string;
-}): Promise<void> {
+export async function scheduleObligationNotification(obligation: RecurringObligation): Promise<void> {
+  if (obligation.status === ObligationStatus.PAID || !obligation.notificationsEnabled) {
+    return;
+  }
   try {
-    await LocalNotifications.schedule({
-      notifications: [
-        {
-          id: options.id,
-          title: options.title,
-          body: options.body,
-          schedule: { at: options.scheduleAt },
-          sound: undefined,
-          extra: { tag: options.tag || '' },
-        },
-      ],
-    });
+    const notifId = getDeterministicNotificationId(obligation.id);
+    // Cancelar primero por si ya existía con otra fecha
+    await LocalNotifications.cancel({ notifications: [{ id: notifId }] });
+
+    const dueParts = obligation.dueDate.split('-');
+    if (dueParts.length === 3) {
+      const year = parseInt(dueParts[0], 10);
+      const month = parseInt(dueParts[1], 10) - 1;
+      const day = parseInt(dueParts[2], 10);
+      const scheduleDate = new Date(year, month, day, 9, 0, 0);
+
+      // Si la fecha ya pasó hoy, programar para un minuto después o no programar
+      if (scheduleDate.getTime() <= Date.now()) {
+        scheduleDate.setTime(Date.now() + 60000);
+      }
+
+      await LocalNotifications.schedule({
+        notifications: [
+          {
+            id: notifId,
+            title: `Gastito: Vencimiento de Cuenta — ${obligation.name}`,
+            body: `La obligación "${obligation.name}" vence hoy o está pendiente de pago.`,
+            schedule: { at: scheduleDate },
+            channelId: 'gastito_reminders',
+            sound: 'default',
+            extra: { obligationId: obligation.id, tag: `obl-${obligation.id}` },
+          },
+        ],
+      });
+    }
   } catch {
     // Entorno web puro sin plugin de Capacitor
   }
 }
 
 /**
- * Dispara una notificación nativa real del sistema operativo/navegador y emite un evento visual in-app.
+ * Cancela la notificación programada de una obligación (al ser pagada o eliminada).
+ */
+export async function cancelObligationNotification(obligationId: string): Promise<void> {
+  try {
+    const notifId = getDeterministicNotificationId(obligationId);
+    await LocalNotifications.cancel({ notifications: [{ id: notifId }] });
+  } catch {
+    // Ignorar si no está en Capacitor
+  }
+}
+
+/**
+ * Reprograma la notificación de una obligación (al cambiar su fecha u otros detalles).
+ */
+export async function rescheduleObligationNotification(obligation: RecurringObligation): Promise<void> {
+  await cancelObligationNotification(obligation.id);
+  await scheduleObligationNotification(obligation);
+}
+
+/**
+ * Obtiene las notificaciones locales pendientes programadas en Capacitor.
+ */
+export async function getPendingNotifications() {
+  try {
+    return await LocalNotifications.getPending();
+  } catch {
+    return { notifications: [] };
+  }
+}
+
+/**
+ * Reconstruye y reprograma todas las notificaciones pendientes de obligaciones al iniciar la app.
+ */
+export async function rebuildAllObligationNotifications(obligations: RecurringObligation[]): Promise<void> {
+  try {
+    await createGastitoNotificationChannel();
+    for (const obl of obligations) {
+      if (obl.status !== ObligationStatus.PAID && obl.notificationsEnabled) {
+        await scheduleObligationNotification(obl);
+      } else {
+        await cancelObligationNotification(obl.id);
+      }
+    }
+  } catch {
+    // Ignorar si Capacitor no está disponible
+  }
+}
+
+/**
+ * Dispara una notificación nativa in-app / web real.
  */
 export async function sendNativeNotification(options: {
   title: string;
@@ -212,7 +360,7 @@ export async function sendNativeNotification(options: {
 }
 
 /**
- * Evalúa automáticamente presupuestos y obligaciones recurrentes, programando también notificaciones persistentes.
+ * Evalúa automáticamente presupuestos y obligaciones recurrentes.
  */
 export function evaluateAndTriggerDatabaseNotifications(
   dbState: AppDatabaseState
@@ -293,49 +441,56 @@ export function evaluateAndTriggerDatabaseNotifications(
       });
   }
 
-  // 2. Evaluar Recordatorios de Pagos Fijos / Obligaciones Recurrentes
+  // 2. Evaluar Recordatorios de Pagos Fijos / Obligaciones Recurrentes (y programar Capacitor si procede)
   if (preferences.recurringRemindersEnabled) {
     const todayObj = new Date();
     const inThreeDaysObj = new Date();
     inThreeDaysObj.setDate(todayObj.getDate() + 3);
     const inThreeDaysStr = getTodayLocalDate(inThreeDaysObj);
 
-    obligations
-      .filter(
-        (o) => o.status !== ObligationStatus.PAID && o.notificationsEnabled
-      )
-      .forEach((obl) => {
-        const amountDesc = obl.isVariableAmount
-          ? obl.amount > 0
-            ? `monto variable (estimado ${formatMoney(obl.amount, symbol)})`
-            : 'monto variable (ingresa cuánto pagaste)'
-          : formatMoney(obl.amount, symbol);
+    obligations.forEach((obl) => {
+      // Sincronizar programación en Capacitor
+      if (obl.status !== ObligationStatus.PAID && obl.notificationsEnabled) {
+        scheduleObligationNotification(obl);
+      } else {
+        cancelObligationNotification(obl.id);
+      }
 
-        if (obl.dueDate < todayStr) {
-          sendNativeNotification({
-            title: `${assistant}: Recordatorio Vencido — ${obl.name}`,
-            body: `La cuenta "${obl.name}" (${amountDesc}) venció el ${obl.dueDate}.`,
-            tag: `obl-overdue-${obl.id}-${obl.dueDate}`,
-            severity: 'danger',
-            hapticEnabled: haptic,
-          });
-        } else if (obl.dueDate === todayStr) {
-          sendNativeNotification({
-            title: `${assistant}: Cuenta Vence Hoy — ${obl.name}`,
-            body: `Recuerda ingresar el monto pagado de "${obl.name}" (${amountDesc}) que vence hoy.`,
-            tag: `obl-today-${obl.id}-${obl.dueDate}`,
-            severity: 'warning',
-            hapticEnabled: haptic,
-          });
-        } else if (obl.dueDate <= inThreeDaysStr) {
-          sendNativeNotification({
-            title: `${assistant}: Próximo Vencimiento — ${obl.name}`,
-            body: `"${obl.name}" (${amountDesc}) vence el ${obl.dueDate}.`,
-            tag: `obl-soon-${obl.id}-${obl.dueDate}`,
-            severity: 'info',
-            hapticEnabled: haptic,
-          });
-        }
-      });
+      if (obl.status === ObligationStatus.PAID || !obl.notificationsEnabled) {
+        return;
+      }
+
+      const amountDesc = obl.isVariableAmount
+        ? obl.amount > 0
+          ? `monto variable (estimado ${formatMoney(obl.amount, symbol)})`
+          : 'monto variable (ingresa cuánto pagaste)'
+        : formatMoney(obl.amount, symbol);
+
+      if (obl.dueDate < todayStr) {
+        sendNativeNotification({
+          title: `${assistant}: Recordatorio Vencido — ${obl.name}`,
+          body: `La cuenta "${obl.name}" (${amountDesc}) venció el ${obl.dueDate}.`,
+          tag: `obl-overdue-${obl.id}-${obl.dueDate}`,
+          severity: 'danger',
+          hapticEnabled: haptic,
+        });
+      } else if (obl.dueDate === todayStr) {
+        sendNativeNotification({
+          title: `${assistant}: Cuenta Vence Hoy — ${obl.name}`,
+          body: `Recuerda ingresar el monto pagado de "${obl.name}" (${amountDesc}) que vence hoy.`,
+          tag: `obl-today-${obl.id}-${obl.dueDate}`,
+          severity: 'warning',
+          hapticEnabled: haptic,
+        });
+      } else if (obl.dueDate <= inThreeDaysStr) {
+        sendNativeNotification({
+          title: `${assistant}: Próximo Vencimiento — ${obl.name}`,
+          body: `"${obl.name}" (${amountDesc}) vence el ${obl.dueDate}.`,
+          tag: `obl-soon-${obl.id}-${obl.dueDate}`,
+          severity: 'info',
+          hapticEnabled: haptic,
+        });
+      }
+    });
   }
 }

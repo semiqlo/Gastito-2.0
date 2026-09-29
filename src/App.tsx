@@ -37,6 +37,11 @@ import {
   NativePermissionState,
   requestNativeNotificationPermission,
   sendNativeNotification,
+  initCapacitorNotificationActionListener,
+  rebuildAllObligationNotifications,
+  scheduleObligationNotification,
+  cancelObligationNotification,
+  rescheduleObligationNotification,
 } from './utils/nativeNotificationManager';
 import { GastitoLogo } from './components/GastitoLogo';
 import { HomeTab } from './components/HomeTab';
@@ -106,8 +111,19 @@ export default function App() {
   const [dismissedPermBanner, setDismissedPermBanner] = useState(false);
   const [activeToasts, setActiveToasts] = useState<InAppNotificationPayload[]>([]);
 
-  // Listen for native notification events to show floating banner
+  // Listen for native notification events to show floating banner & initialize Capacitor action listener
   useEffect(() => {
+    initCapacitorNotificationActionListener();
+    rebuildAllObligationNotifications(dbState.obligations);
+
+    const navHandler = (e: Event) => {
+      const custom = e as CustomEvent;
+      if (custom.detail?.tab) {
+        setActiveTab(custom.detail.tab);
+      }
+    };
+    window.addEventListener('gastito-navigate-tab', navHandler);
+
     const handler = (e: Event) => {
       const custom = e as CustomEvent<InAppNotificationPayload>;
       if (!custom.detail) return;
@@ -118,7 +134,10 @@ export default function App() {
       }, 6500);
     };
     window.addEventListener('gastito-native-notification', handler);
-    return () => window.removeEventListener('gastito-native-notification', handler);
+    return () => {
+      window.removeEventListener('gastito-native-notification', handler);
+      window.removeEventListener('gastito-navigate-tab', navHandler);
+    };
   }, []);
 
   // Persist locally on every state update & evaluate notification rules
@@ -542,24 +561,30 @@ export default function App() {
     oblData: Omit<RecurringObligation, 'id'>,
     existingId?: string
   ) => {
+    let savedObl: RecurringObligation | undefined;
     setDbState((prev) => {
       if (existingId) {
-        return {
-          ...prev,
-          obligations: prev.obligations.map((o) =>
-            o.id === existingId ? { ...o, ...oblData } : o
-          ),
-        };
+        const updatedList = prev.obligations.map((o) => {
+          if (o.id === existingId) {
+            savedObl = { ...o, ...oblData, id: existingId };
+            return savedObl;
+          }
+          return o;
+        });
+        return { ...prev, obligations: updatedList };
       }
-      const newObl: RecurringObligation = {
+      savedObl = {
         ...oblData,
         id: `obl-${Date.now()}`,
       };
       return {
         ...prev,
-        obligations: [...prev.obligations, newObl],
+        obligations: [savedObl, ...prev.obligations],
       };
     });
+    if (savedObl) {
+      rescheduleObligationNotification(savedObl);
+    }
   };
 
   const handlePayObligationById = (obligationId: string) => {
@@ -582,6 +607,7 @@ export default function App() {
       updateReferenceAmount,
     } = payload;
 
+    cancelObligationNotification(obligation.id);
     const txId = `tx-obl-${Date.now()}`;
     const isInst = Boolean(obligation.isInstallmentPlan && obligation.totalInstallments);
     const nextInstallmentNum = isInst
@@ -712,6 +738,7 @@ export default function App() {
   };
 
   const handleDeleteObligation = (obligationId: string) => {
+    cancelObligationNotification(obligationId);
     setDbState((prev) => ({
       ...prev,
       obligations: prev.obligations.filter((o) => o.id !== obligationId),
