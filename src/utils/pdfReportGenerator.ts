@@ -5,7 +5,11 @@ import {
   DebtType,
   TransactionType,
 } from '../domain/models';
-import { calculateAccountBalance, formatMoney } from '../data/localRepository';
+import {
+  calculateAccountBalance,
+  formatMoney,
+  getTodayLocalDate,
+} from '../data/localRepository';
 import {
   calculateStatisticalMetrics,
   EconomicIndicatorsData,
@@ -68,12 +72,29 @@ function hexToRgb(hex: string): [number, number, number] {
 }
 
 /**
- * Genera y descarga directamente un archivo .PDF nativo con jsPDF.
- * Incluye rango de fechas explícito, controles estadísticos (desviación estándar, CV%, burn rate),
- * indicadores económicos (UF, Dólar, Euro, UTM) y gráficos vectoriales de líneas y barras
- * incluso cuando los datos son $0.00.
+ * Carga la imagen PNG oficial de Gastito en formato Data URL (base64) para incrustarla en el PDF.
  */
-export function generateAndDownloadPdfReport(input: PdfReportInput): void {
+async function loadOfficialLogoDataUrl(): Promise<string | null> {
+  try {
+    const res = await fetch('/assets/brand/gastito-logo.png');
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Genera y descarga directamente un archivo .PDF nativo con jsPDF.
+ * Incluye rango de fechas explícito, controles estadísticos, indicadores económicos y gráficos.
+ */
+export async function generateAndDownloadPdfReport(input: PdfReportInput): Promise<void> {
   const {
     dbState,
     startDate,
@@ -142,25 +163,22 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
   };
 
   // =========================================================================
-  // CABECERA FORMAL CON LOGO OFICIAL GASTITO Y RANGO DE FECHAS
+  // CABECERA FORMAL CON LOGO OFICIAL GASTITO PNG Y RANGO DE FECHAS
   // =========================================================================
-  doc.setFillColor(4, 120, 87); // Emerald 700
-  doc.roundedRect(margin, y, 13, 13, 3, 3, 'F');
+  const logoDataUrl = await loadOfficialLogoDataUrl();
+  if (logoDataUrl) {
+    try {
+      const logoWidth = 12; // mm
+      const aspectRatio = 1.0; // Ratio real del PNG oficial
+      const logoHeight = logoWidth / aspectRatio;
+      doc.addImage(logoDataUrl, 'PNG', margin, y, logoWidth, logoHeight, undefined, 'FAST');
+    } catch {
+      // Ignorar si falla la carga de la imagen
+    }
+  }
 
-  // Doble barra vertical tipo $ dentro del logo
-  doc.setDrawColor(167, 243, 208);
-  doc.setLineWidth(0.6);
-  doc.line(margin + 5.3, y + 2.2, margin + 5.3, y + 10.8);
-  doc.line(margin + 7.7, y + 2.2, margin + 7.7, y + 10.8);
-
-  // Letra G estilizada en blanco
-  doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13);
-  doc.text('G', margin + 6.5, y + 8.5, { align: 'center' });
-
-  // Títulos de cabecera
-  doc.setTextColor(28, 25, 23);
+  // Títulos de cabecera con Azul Petróleo (#003B4A)
+  doc.setTextColor(0, 59, 74);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(13);
   doc.text('GASTITO 2.0 — INFORME ESTADÍSTICO Y FINANCIERO', margin + 16, y + 5);
@@ -170,27 +188,27 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
   doc.setTextColor(87, 83, 78);
   doc.text(
     `Titular: ${configuredUserName}  |  Asistente: ${assistantName}  |  Emisión: ${
-      new Date().toISOString().split('T')[0]
+      getTodayLocalDate()
     }`,
     margin + 16,
     y + 9.5
   );
 
-  // Cinta destacada de Rango de Fechas
-  doc.setFillColor(236, 253, 245); // Emerald 50
-  doc.setDrawColor(16, 185, 129);
-  doc.setLineWidth(0.3);
-  doc.roundedRect(margin, y + 15, contentW, 8, 2, 2, 'FD');
+  // Cinta destacada de Rango de Fechas en Blanco Cálido y verde principal #00C98B
+  doc.setFillColor(247, 248, 232); // #F7F8E8 Blanco cálido
+  doc.setDrawColor(0, 201, 139); // #00C98B Verde principal
+  doc.setLineWidth(0.4);
+  doc.roundedRect(margin, y + 16, contentW, 8, 2, 2, 'FD');
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
-  doc.setTextColor(6, 95, 70);
+  doc.setTextColor(0, 107, 103); // #006B67 Verde oscuro / teal
   doc.text(
     `RANGO DE FECHAS DEL INFORME: Desde ${startDate} hasta ${endDate} (${periodLabel})`,
     margin + 3,
-    y + 20.2
+    y + 21.2
   );
 
-  y += 27;
+  y += 32;
 
   // =========================================================================
   // 1. RESUMEN DEL PERÍODO Y CONTROLES ECONÓMICOS / ESTADÍSTICOS
@@ -235,14 +253,14 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
         sub: `Ant: ${formatMoney(monthlyComparison.previousMonthTotal, currencySymbol)}`,
       },
       {
-        label: 'DESV. ESTÁNDAR (σ)',
+        label: 'DESV. ESTANDAR (Est.)',
         val: formatMoney(expenseStats.stdDev, currencySymbol),
         sub: `Mensual: ${formatMoney(monthlyComparison.monthlyStdDev, currencySymbol)}`,
       },
       {
-        label: 'COEF. VARIACIÓN / PROM',
+        label: 'COEF. VARIACION / PROM',
         val: `CV: ${expenseStats.cvPct.toFixed(1)}%`,
-        sub: `μ: ${formatMoney(expenseStats.mean, currencySymbol)}`,
+        sub: `Prom: ${formatMoney(expenseStats.mean, currencySymbol)}`,
       },
     ];
 
@@ -611,8 +629,8 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
     doc.setTextColor(255, 255, 255);
     doc.text('Categoría (Seleccionada)', margin + 2, y + 4.1);
     doc.text('Mov.', margin + 72, y + 4.1, { align: 'right' });
-    doc.text('Promedio (μ)', margin + 104, y + 4.1, { align: 'right' });
-    doc.text('Desv. Est. (σ)', margin + 136, y + 4.1, { align: 'right' });
+    doc.text('Promedio', margin + 104, y + 4.1, { align: 'right' });
+    doc.text('Desv. Est.', margin + 136, y + 4.1, { align: 'right' });
     doc.text('% Gasto', margin + 158, y + 4.1, { align: 'right' });
     doc.text('Monto Total', margin + contentW - 2, y + 4.1, { align: 'right' });
     y += 6;
@@ -771,25 +789,39 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
     }
 
     if (sections.obligations) {
-      ensureSpace(10);
+      ensureSpace(16);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.5);
-      doc.setTextColor(4, 120, 87);
+      doc.setTextColor(0, 59, 74); // Azul petróleo
       doc.text(
-        `• Recordatorios de Cuentas (Monto Variable / Fijo) (${obligations.length}):`,
+        `• Recordatorios de Cuentas y Obligaciones (${obligations.length}):`,
         margin,
         y
       );
-      y += 3.8;
+      y += 4.5;
+
       if (obligations.length === 0) {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(7);
         doc.setTextColor(120, 113, 108);
         doc.text('Sin recordatorios ni cuentas registradas.', margin + 4, y);
-        y += 4.5;
+        y += 6;
       } else {
+        // Tabla limpia de obligaciones
+        doc.setFillColor(245, 247, 245);
+        doc.rect(margin + 2, y, contentW - 4, 5.5, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.5);
+        doc.setTextColor(0, 107, 103);
+        doc.text('Cuenta / Recordatorio', margin + 4, y + 3.8);
+        doc.text('Tipo', margin + 62, y + 3.8);
+        doc.text('Vence', margin + 95, y + 3.8);
+        doc.text('Referencial', margin + 120, y + 3.8, { align: 'right' });
+        doc.text('Pagado Rango', margin + 150, y + 3.8, { align: 'right' });
+        doc.text('Promedio', margin + contentW - 4, y + 3.8, { align: 'right' });
+        y += 6;
+
         obligations.forEach((o) => {
-          ensureSpace(5.5);
           const linkedAll = transactions.filter(
             (t) =>
               t.linkedObligationId === o.id && t.type === TransactionType.EXPENSE
@@ -808,42 +840,46 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
               : (o.paymentHistory || [])
                   .filter((p) => p.date >= startDate && p.date <= endDate)
                   .reduce((s, p) => s + p.amountPaid, 0);
-          const lastPaid =
-            o.lastPaidAmount ??
-            (linkedAll.length > 0 ? linkedAll[0].amount : 0);
 
-          const typeLabel = o.isVariableAmount
-            ? 'Cuenta Variable'
-            : 'Monto Fijo';
+          const typeLabel = o.isInstallmentPlan
+            ? `Cuotas (${o.paidInstallments || 0}/${o.totalInstallments || 1})`
+            : o.isSubscription
+            ? 'Suscripción TC'
+            : o.isVariableAmount
+            ? 'Variable'
+            : 'Fijo';
           const refText =
-            o.amount > 0 ? formatMoney(o.amount, currencySymbol) : 'Variable';
+            o.amount > 0 ? formatMoney(o.amount, currencySymbol) : 'Var.';
+
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(6.8);
+          const nameLines = doc.splitTextToSize(o.name, 54);
+          const rowH = Math.max(5.5, nameLines.length * 3.2 + 2.5);
+          ensureSpace(rowH + 2);
+
+          doc.setTextColor(28, 25, 23);
+          doc.text(nameLines, margin + 4, y + 3.5);
 
           doc.setFont('helvetica', 'normal');
-          doc.setFontSize(6.8);
+          doc.setFontSize(6.5);
+          doc.setTextColor(87, 83, 78);
+          doc.text(typeLabel, margin + 62, y + 3.5);
+          doc.text(o.dueDate, margin + 95, y + 3.5);
+
+          doc.setFont('helvetica', 'bold');
           doc.setTextColor(28, 25, 23);
-          doc.text(
-            `${o.name} [${typeLabel}] — Vence: ${
-              o.dueDate
-            } — Ref: ${refText} | Pagado en rango: ${formatMoney(
-              paidInRange,
-              currencySymbol
-            )} | Último: ${formatMoney(
-              lastPaid,
-              currencySymbol
-            )} | Prom(μ): ${formatMoney(
-              st.mean,
-              currencySymbol
-            )} (σ: ${formatMoney(st.stdDev, currencySymbol)})`,
-            margin + 4,
-            y
-          );
-          y += 4.4;
+          doc.text(refText, margin + 120, y + 3.5, { align: 'right' });
+          doc.text(formatMoney(paidInRange, currencySymbol), margin + 150, y + 3.5, { align: 'right' });
+          doc.text(formatMoney(st.mean, currencySymbol), margin + contentW - 4, y + 3.5, { align: 'right' });
+
+          y += rowH;
         });
       }
+      y += 4;
     }
 
     if (sections.debts) {
-      ensureSpace(8);
+      ensureSpace(12);
       const pendingDebts = debts.filter((d) => !d.isPaid);
       const owedToMe = pendingDebts
         .filter((d) => d.type === DebtType.OWED_TO_ME)
@@ -853,7 +889,7 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
         .reduce((s, d) => s + d.amount, 0);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.5);
-      doc.setTextColor(4, 120, 87);
+      doc.setTextColor(0, 59, 74); // Azul petróleo
       doc.text(
         `• Control de Deudas Pendientes (${pendingDebts.length}) — Me deben: ${formatMoney(
           owedToMe,
@@ -862,7 +898,7 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
         margin,
         y
       );
-      y += 4;
+      y += 6;
     }
   }
 

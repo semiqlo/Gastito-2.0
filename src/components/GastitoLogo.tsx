@@ -32,51 +32,24 @@ interface GastitoLogoProps {
 }
 
 /**
- * Logo oficial de Gastito:
- * Letra "G" estilizada con dos rayas verticales paralelas (estilo signo de dólar $)
+ * Logo oficial y definitivo de Gastito (PNG oficial).
  */
-export const GastitoLogo: React.FC<GastitoLogoProps> = ({ size = 34, className = '' }) => {
+export const GastitoLogo: React.FC<GastitoLogoProps> = ({ size = 36, className = '' }) => {
   return (
-    <svg
+    <img
+      src="/assets/brand/gastito-logo.png"
       width={size}
       height={size}
-      viewBox="0 0 48 48"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
       className={className}
-      aria-label="Gastito Logo"
-    >
-      <rect width="48" height="48" rx="12" className="fill-emerald-600 dark:fill-emerald-500" />
-      {/* Dos rayas verticales paralelas estilo signo $ */}
-      <line
-        x1="21"
-        y1="7"
-        x2="21"
-        y2="41"
-        stroke="white"
-        strokeWidth="2.8"
-        strokeLinecap="round"
-        strokeOpacity="0.92"
-      />
-      <line
-        x1="27"
-        y1="7"
-        x2="27"
-        y2="41"
-        stroke="white"
-        strokeWidth="2.8"
-        strokeLinecap="round"
-        strokeOpacity="0.92"
-      />
-      {/* Letra G estilizada geométrica */}
-      <path
-        d="M34 17.5C32.2 14.2 28.5 12 24 12C17.3726 12 12 17.3726 12 24C12 30.6274 17.3726 36 24 36C30.2 36 35.2 31.4 35.9 25.5H24.5"
-        stroke="white"
-        strokeWidth="4.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+      alt="Gastito Logo Oficial"
+      style={{
+        width: `${size}px`,
+        height: `${size}px`,
+        objectFit: 'contain',
+        display: 'inline-block',
+        verticalAlign: 'middle',
+      }}
+    />
   );
 };
 
@@ -161,8 +134,7 @@ export const CategoryIcon: React.FC<{
       return <CreditCard {...props} />;
     case 'Landmark':
       return <Landmark {...props} />;
-    case 'MoreHorizontal':
-      return <MoreHorizontal {...props} />;
+    case 'CircleDollarSign':
     default:
       return <CircleDollarSign {...props} />;
   }

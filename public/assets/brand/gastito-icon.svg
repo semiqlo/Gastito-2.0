@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="appIconGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00C98B" />
+      <stop offset="55%" stop-color="#006B67" />
+      <stop offset="100%" stop-color="#003B4A" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#appIconGrad)" />
+  <rect x="206" y="80" width="30" height="352" rx="15" fill="#8EF2C5" opacity="0.95" />
+  <rect x="276" y="80" width="30" height="352" rx="15" fill="#8EF2C5" opacity="0.95" />
+  <path d="M360 170C335 130 290 106 240 106C148 106 74 180 74 272C74 364 148 438 240 438C318 438 378 384 394 310H248" 
+        stroke="#F7F8E8" stroke-width="62" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+  <path d="M248 272H394" stroke="#F7F8E8" stroke-width="56" stroke-linecap="round" fill="none" />
+</svg>
