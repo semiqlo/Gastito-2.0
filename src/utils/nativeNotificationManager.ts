@@ -3,7 +3,8 @@ import {
   ObligationStatus,
   TransactionType,
 } from '../domain/models';
-import { formatMoney, triggerHaptic } from '../data/localRepository';
+import { formatMoney, getTodayLocalDate, triggerHaptic } from '../data/localRepository';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 export type NativePermissionState =
   | 'granted'
@@ -20,11 +21,11 @@ export interface InAppNotificationPayload {
   createdAt: number;
 }
 
-const NOTIFIED_KEYS_STORAGE = 'gastito_v2_notified_tags_session';
+const NOTIFIED_KEYS_STORAGE = 'gastito_v2_notified_tags_persistent';
 
 function getNotifiedSet(): Set<string> {
   try {
-    const raw = sessionStorage.getItem(NOTIFIED_KEYS_STORAGE);
+    const raw = localStorage.getItem(NOTIFIED_KEYS_STORAGE);
     if (!raw) return new Set();
     return new Set(JSON.parse(raw));
   } catch {
@@ -36,26 +37,44 @@ function markNotified(tag: string): void {
   try {
     const set = getNotifiedSet();
     set.add(tag);
-    sessionStorage.setItem(NOTIFIED_KEYS_STORAGE, JSON.stringify(Array.from(set)));
+    // Mantener solo los últimos 200 tags para evitar crecimiento excesivo
+    const arr = Array.from(set);
+    if (arr.length > 200) {
+      arr.splice(0, arr.length - 200);
+    }
+    localStorage.setItem(NOTIFIED_KEYS_STORAGE, JSON.stringify(arr));
   } catch {
     // Ignore storage errors
   }
 }
 
 /**
- * Obtiene el estado actual del permiso nativo de notificaciones del navegador / sistema operativo.
+ * Obtiene el estado actual del permiso nativo de notificaciones del navegador / sistema operativo / Capacitor.
  */
 export function getNativeNotificationPermission(): NativePermissionState {
-  if (typeof window === 'undefined' || !('Notification' in window)) {
+  if (typeof window === 'undefined') {
     return 'unsupported';
   }
-  return Notification.permission as NativePermissionState;
+  if ('Notification' in window) {
+    return Notification.permission as NativePermissionState;
+  }
+  return 'default';
 }
 
 /**
- * Solicita explícitamente permiso nativo al usuario para mostrar notificaciones del sistema.
+ * Solicita explícitamente permiso nativo al usuario tanto en Web como en Capacitor Android.
  */
 export async function requestNativeNotificationPermission(): Promise<NativePermissionState> {
+  try {
+    // Solicitar permiso de Capacitor Local Notifications
+    const capRes = await LocalNotifications.requestPermissions();
+    if (capRes.display === 'granted') {
+      return 'granted';
+    }
+  } catch {
+    // Capacitor no disponible o web puro
+  }
+
   if (typeof window === 'undefined' || !('Notification' in window)) {
     return 'unsupported';
   }
@@ -71,8 +90,35 @@ export async function requestNativeNotificationPermission(): Promise<NativePermi
 }
 
 /**
- * Dispara una notificación nativa real del sistema operativo/navegador (Web Notification API / ServiceWorker)
- * y emite simultáneamente un evento visual en la aplicación para garantizar visibilidad inmediata.
+ * Programa una notificación local en Capacitor para que aparezca en el dispositivo incluso con la app cerrada.
+ */
+export async function scheduleCapacitorNotification(options: {
+  id: number;
+  title: string;
+  body: string;
+  scheduleAt: Date;
+  tag?: string;
+}): Promise<void> {
+  try {
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id: options.id,
+          title: options.title,
+          body: options.body,
+          schedule: { at: options.scheduleAt },
+          sound: undefined,
+          extra: { tag: options.tag || '' },
+        },
+      ],
+    });
+  } catch {
+    // Entorno web puro sin plugin de Capacitor
+  }
+}
+
+/**
+ * Dispara una notificación nativa real del sistema operativo/navegador y emite un evento visual in-app.
  */
 export async function sendNativeNotification(options: {
   title: string;
@@ -110,7 +156,6 @@ export async function sendNativeNotification(options: {
     );
   }
 
-  // Emitir evento para el banner nativo in-app (útil también cuando el navegador está en primer plano o iframe)
   if (typeof window !== 'undefined') {
     const payload: InAppNotificationPayload = {
       id: `${tag}-${Date.now()}`,
@@ -127,7 +172,6 @@ export async function sendNativeNotification(options: {
     );
   }
 
-  // Disparar Notificación Nativa del Sistema Operativo / Navegador si tiene permiso concedido
   if (typeof window !== 'undefined' && 'Notification' in window) {
     if (Notification.permission === 'granted') {
       try {
@@ -142,7 +186,7 @@ export async function sendNativeNotification(options: {
           }
         }
       } catch {
-        // Fallback al constructor estándar Notification
+        // Fallback
       }
 
       try {
@@ -159,7 +203,6 @@ export async function sendNativeNotification(options: {
         }, 7000);
         return true;
       } catch {
-        // En algunos contextos móviles/iframe new Notification puede requerir SW; el banner in-app ya se mostró
         return true;
       }
     }
@@ -169,8 +212,7 @@ export async function sendNativeNotification(options: {
 }
 
 /**
- * Evalúa automáticamente presupuestos (80%, 90%, 100%, Superado) y pagos fijos/obligaciones
- * próximas a vencer o vencidas, disparando notificaciones nativas si están activadas.
+ * Evalúa automáticamente presupuestos y obligaciones recurrentes, programando también notificaciones persistentes.
  */
 export function evaluateAndTriggerDatabaseNotifications(
   dbState: AppDatabaseState
@@ -184,8 +226,9 @@ export function evaluateAndTriggerDatabaseNotifications(
   const symbol = preferences.currencySymbol || '$';
   const haptic = preferences.hapticFeedbackEnabled;
   const catMap = new Map(categories.map((c) => [c.id, c.name]));
+  const todayStr = getTodayLocalDate();
 
-  // 1. Evaluar Alertas de Presupuesto (80%, 90%, 100%, Superado)
+  // 1. Evaluar Alertas de Presupuesto
   if (preferences.budgetAlertsEnabled) {
     budgets
       .filter((b) => b.isActive && b.limitAmount > 0)
@@ -252,12 +295,10 @@ export function evaluateAndTriggerDatabaseNotifications(
 
   // 2. Evaluar Recordatorios de Pagos Fijos / Obligaciones Recurrentes
   if (preferences.recurringRemindersEnabled) {
-    const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
-
-    const inThreeDays = new Date();
-    inThreeDays.setDate(today.getDate() + 3);
-    const inThreeDaysStr = inThreeDays.toISOString().split('T')[0];
+    const todayObj = new Date();
+    const inThreeDaysObj = new Date();
+    inThreeDaysObj.setDate(todayObj.getDate() + 3);
+    const inThreeDaysStr = getTodayLocalDate(inThreeDaysObj);
 
     obligations
       .filter(

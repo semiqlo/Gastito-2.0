@@ -22,6 +22,13 @@ import {
 
 const STORAGE_KEY = 'gastito_2_0_local_db_v1';
 
+export function getTodayLocalDate(dateObj: Date = new Date()): string {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export const INITIAL_CATEGORIES: Category[] = [
   { id: 'cat-comida', name: 'Comida', icon: 'Utensils', type: TransactionType.EXPENSE, color: '#D97706', isActive: true, isDeleted: false },
   { id: 'cat-super', name: 'Supermercado', icon: 'ShoppingCart', type: TransactionType.EXPENSE, color: '#16A34A', isActive: true, isDeleted: false },

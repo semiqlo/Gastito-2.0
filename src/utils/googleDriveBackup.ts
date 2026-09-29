@@ -2,10 +2,12 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getAuth,
   signInWithPopup,
+  signInWithRedirect,
   GoogleAuthProvider,
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { AppDatabaseState } from '../domain/models';
 
@@ -50,7 +52,18 @@ export const googleSignIn = async (): Promise<{
 } | null> => {
   try {
     isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
+    let result;
+    if (Capacitor.isNativePlatform()) {
+      try {
+        result = await signInWithPopup(auth, provider);
+      } catch {
+        await signInWithRedirect(auth, provider);
+        return { cancelled: true, errorMessage: 'Redirigiendo a autenticación de Google...' };
+      }
+    } else {
+      result = await signInWithPopup(auth, provider);
+    }
+
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
       return {

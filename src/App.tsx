@@ -25,6 +25,7 @@ import {
   createBlankDatabase,
   createSeedDatabase,
   formatMoney,
+  getTodayLocalDate,
   loadLocalDatabase,
   saveLocalDatabase,
   triggerHaptic,
@@ -128,13 +129,18 @@ export default function App() {
 
   // Generación automática de cuotas fijas mensuales (con fecha de término) y suscripciones automáticas en Tarjeta de Crédito al llegar su fecha de cobro
   useEffect(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getTodayLocalDate();
     const dueAutoObligations = dbState.obligations.filter((o) => {
       if (o.status === ObligationStatus.PAID) return false;
       if (!o.autoChargeCard && !o.isSubscription) return false;
       if (o.amount <= 0) return false;
       if (o.dueDate > todayStr) return false;
       if (o.lastPaidDate === o.dueDate) return false;
+      // Protección contra duplicados si ya existe una transacción para esta obligación en esta misma fecha
+      const alreadyExists = dbState.transactions.some(
+        (t) => t.linkedObligationId === o.id && t.date === o.dueDate
+      );
+      if (alreadyExists) return false;
       if (
         o.isInstallmentPlan &&
         o.totalInstallments &&
