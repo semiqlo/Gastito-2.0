@@ -1,0 +1,6 @@
+{
+  "name": "Gastito 2.0",
+  "description": "Aplicación de finanzas personales 100% local, ultrarrápida y privada con gestión de gastos, ingresos, cuentas, deudas, presupuestos, pagos recurrentes y arquitectura Android nativa (Kotlin + Jetpack Compose).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
