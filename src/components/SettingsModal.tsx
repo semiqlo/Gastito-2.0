@@ -12,6 +12,12 @@ import {
   exportToMultiSheetExcel,
 } from '../utils/exportManager';
 import { triggerHaptic } from '../data/localRepository';
+import {
+  getNativeNotificationPermission,
+  NativePermissionState,
+  requestNativeNotificationPermission,
+  sendNativeNotification,
+} from '../utils/nativeNotificationManager';
 import { GoogleDriveBackupSection } from './GoogleDriveBackupSection';
 import {
   AlertTriangle,
@@ -89,10 +95,63 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [catColor, setCatColor] = useState<string>('#047857');
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [nativePerm, setNativePerm] = useState<NativePermissionState>(() =>
+    getNativeNotificationPermission()
+  );
+  const [notifFeedback, setNotifFeedback] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
+
+  const handleRequestNativePermission = async () => {
+    triggerHaptic(preferences.hapticFeedbackEnabled, 15);
+    const result = await requestNativeNotificationPermission();
+    setNativePerm(result);
+    if (result === 'granted') {
+      onUpdatePreferences({
+        notificationsEnabled: true,
+        budgetAlertsEnabled: true,
+        recurringRemindersEnabled: true,
+      });
+      await sendNativeNotification({
+        title: `${preferences.assistantName || 'Gastito'}: Notificaciones Nativas Activas`,
+        body: 'El permiso fue concedido correctamente. Recibirás alertas de presupuestos y pagos fijos.',
+        tag: `perm-granted-${Date.now()}`,
+        severity: 'success',
+        hapticEnabled: preferences.hapticFeedbackEnabled,
+        forceRepeat: true,
+      });
+      setNotifFeedback('Permiso concedido y notificaciones nativas activadas.');
+    } else if (result === 'denied') {
+      setNotifFeedback(
+        'El permiso de notificaciones está bloqueado en la configuración del navegador.'
+      );
+    } else {
+      setNotifFeedback('Solicitud de permiso cerrada sin confirmar.');
+    }
+    setTimeout(() => setNotifFeedback(null), 4000);
+  };
+
+  const handleTestNativeNotification = async () => {
+    triggerHaptic(preferences.hapticFeedbackEnabled, [15, 30]);
+    if (getNativeNotificationPermission() === 'default') {
+      const res = await requestNativeNotificationPermission();
+      setNativePerm(res);
+    }
+    await sendNativeNotification({
+      title: `${preferences.assistantName || 'Gastito'} — Prueba de Alerta Nativa`,
+      body: `Hola ${
+        preferences.userName?.trim() || 'Usuario'
+      }, las notificaciones nativas de presupuestos y pagos fijos están funcionando correctamente.`,
+      tag: `test-notif-${Date.now()}`,
+      severity: 'info',
+      hapticEnabled: preferences.hapticFeedbackEnabled,
+      forceRepeat: true,
+    });
+    setNotifFeedback('Notificación nativa de prueba enviada.');
+    setTimeout(() => setNotifFeedback(null), 3500);
+  };
 
   const visibleCategories = categories.filter((c) => !c.isDeleted);
 
@@ -463,13 +522,79 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
 
           {activeTab === 'NOTIFICATIONS' && (
-            <div className="space-y-3">
+            <div className="space-y-3.5">
+              {/* Tarjeta de Permiso Nativo del Sistema / Navegador */}
+              <div className="p-4 rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-700 text-white flex items-center justify-center shrink-0">
+                      <Bell className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-stone-900 dark:text-zinc-100">
+                        Permiso de Notificaciones Nativas del Dispositivo
+                      </h4>
+                      <p className="text-[11px] text-stone-500 dark:text-zinc-400">
+                        Autoriza al sistema para mostrar alertas emergentes de presupuestos y vencimientos
+                      </p>
+                    </div>
+                  </div>
+
+                  <span
+                    className={`text-[11px] font-bold px-2.5 py-1 rounded-lg ${
+                      nativePerm === 'granted'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : nativePerm === 'denied'
+                        ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                    }`}
+                  >
+                    {nativePerm === 'granted'
+                      ? 'Permiso Concedido'
+                      : nativePerm === 'denied'
+                      ? 'Permiso Bloqueado'
+                      : nativePerm === 'default'
+                      ? 'Requiere Autorización'
+                      : 'Modo Integrado Activo'}
+                  </span>
+                </div>
+
+                {notifFeedback && (
+                  <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-emerald-200 dark:border-emerald-800 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                    <Check className="w-4 h-4 shrink-0" />
+                    <span>{notifFeedback}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {nativePerm !== 'granted' && (
+                    <button
+                      type="button"
+                      onClick={handleRequestNativePermission}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors"
+                    >
+                      <Bell className="w-3.5 h-3.5" />
+                      Solicitar Permiso y Activar Notificaciones
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleTestNativeNotification}
+                    className="px-3.5 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-700 hover:border-emerald-600 text-stone-800 dark:text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <Bell className="w-3.5 h-3.5 text-emerald-600" />
+                    Enviar Notificación Nativa de Prueba
+                  </button>
+                </div>
+              </div>
+
               {(
                 [
                   {
                     key: 'notificationsEnabled',
-                    title: 'Notificaciones Locales (WorkManager)',
-                    desc: 'Activar el motor local de notificaciones en el dispositivo',
+                    title: 'Notificaciones Nativas del Sistema',
+                    desc: 'Activar el motor general de notificaciones en el dispositivo',
                   },
                   {
                     key: 'budgetAlertsEnabled',
@@ -479,7 +604,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {
                     key: 'recurringRemindersEnabled',
                     title: 'Recordatorios de Pagos Fijos / Obligaciones',
-                    desc: 'Notificar antes de la fecha de vencimiento de cada obligación pendiente',
+                    desc: 'Notificar cuando una obligación esté próxima a vencer, venza hoy o esté atrasada',
                   },
                   {
                     key: 'hapticFeedbackEnabled',
@@ -503,7 +628,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <input
                       type="checkbox"
                       checked={checked}
-                      onChange={(e) => onUpdatePreferences({ [item.key]: e.target.checked })}
+                      onChange={async (e) => {
+                        const nextVal = e.target.checked;
+                        onUpdatePreferences({ [item.key]: nextVal });
+                        if (
+                          nextVal &&
+                          item.key !== 'hapticFeedbackEnabled' &&
+                          getNativeNotificationPermission() === 'default'
+                        ) {
+                          const perm = await requestNativeNotificationPermission();
+                          setNativePerm(perm);
+                        }
+                      }}
                       className="w-5 h-5 accent-emerald-700 rounded-md"
                     />
                   </label>

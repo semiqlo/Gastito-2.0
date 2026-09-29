@@ -24,25 +24,46 @@ import {
 import {
   createBlankDatabase,
   createSeedDatabase,
+  formatMoney,
   loadLocalDatabase,
   saveLocalDatabase,
   triggerHaptic,
 } from './data/localRepository';
+import {
+  evaluateAndTriggerDatabaseNotifications,
+  getNativeNotificationPermission,
+  InAppNotificationPayload,
+  NativePermissionState,
+  requestNativeNotificationPermission,
+  sendNativeNotification,
+} from './utils/nativeNotificationManager';
 import { GastitoLogo } from './components/GastitoLogo';
 import { HomeTab } from './components/HomeTab';
 import { MovementsTab } from './components/MovementsTab';
 import { AccountsTab } from './components/AccountsTab';
 import { DebtsTab } from './components/DebtsTab';
 import { SummaryTab } from './components/SummaryTab';
-import { QuickEntryModal, QuickEntryMode } from './components/QuickEntryModal';
+import {
+  QuickEntryModal,
+  QuickEntryMode,
+  CardChargeType,
+} from './components/QuickEntryModal';
+import {
+  PayObligationModal,
+  PayObligationPayload,
+} from './components/PayObligationModal';
 import { SettingsModal } from './components/SettingsModal';
 import {
+  AlertTriangle,
   BarChart3,
+  Bell,
+  CheckCircle2,
   Home,
   ListFilter,
   Settings,
   Users,
   Wallet,
+  X,
 } from 'lucide-react';
 
 type MainTab = 'INICIO' | 'MOVIMIENTOS' | 'CUENTAS' | 'DEUDAS' | 'RESUMEN';
@@ -64,16 +85,142 @@ export default function App() {
   const [quickEntryOpen, setQuickEntryOpen] = useState(false);
   const [quickEntryMode, setQuickEntryMode] = useState<QuickEntryMode>('EXPENSE');
   const [preselectCatId, setPreselectCatId] = useState<string | undefined>(undefined);
+  const [preselectAccId, setPreselectAccId] = useState<string | undefined>(undefined);
+  const [initialCardChargeType, setInitialCardChargeType] =
+    useState<CardChargeType>('SINGLE');
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [editingTr, setEditingTr] = useState<AccountTransfer | null>(null);
 
   // Settings Modal
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Persist locally on every state update
+  // Modal para confirmar el monto efectivamente pagado en una cuenta / recordatorio (Luz, Agua, Gastos Comunes, Arriendo, etc.)
+  const [payingObligation, setPayingObligation] =
+    useState<RecurringObligation | null>(null);
+
+  // Native Notifications State
+  const [nativePerm, setNativePerm] = useState<NativePermissionState>(() =>
+    getNativeNotificationPermission()
+  );
+  const [dismissedPermBanner, setDismissedPermBanner] = useState(false);
+  const [activeToasts, setActiveToasts] = useState<InAppNotificationPayload[]>([]);
+
+  // Listen for native notification events to show floating banner
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const custom = e as CustomEvent<InAppNotificationPayload>;
+      if (!custom.detail) return;
+      const item = custom.detail;
+      setActiveToasts((prev) => [item, ...prev.slice(0, 2)]);
+      setTimeout(() => {
+        setActiveToasts((prev) => prev.filter((t) => t.id !== item.id));
+      }, 6500);
+    };
+    window.addEventListener('gastito-native-notification', handler);
+    return () => window.removeEventListener('gastito-native-notification', handler);
+  }, []);
+
+  // Persist locally on every state update & evaluate notification rules
   useEffect(() => {
     saveLocalDatabase(dbState);
+    evaluateAndTriggerDatabaseNotifications(dbState);
   }, [dbState]);
+
+  // Generación automática de cuotas fijas mensuales (con fecha de término) y suscripciones automáticas en Tarjeta de Crédito al llegar su fecha de cobro
+  useEffect(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const dueAutoObligations = dbState.obligations.filter((o) => {
+      if (o.status === ObligationStatus.PAID) return false;
+      if (!o.autoChargeCard && !o.isSubscription) return false;
+      if (o.amount <= 0) return false;
+      if (o.dueDate > todayStr) return false;
+      if (o.lastPaidDate === o.dueDate) return false;
+      if (
+        o.isInstallmentPlan &&
+        o.totalInstallments &&
+        (o.paidInstallments || 0) >= o.totalInstallments
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (dueAutoObligations.length === 0) return;
+
+    setDbState((prev) => {
+      const newTransactions: Transaction[] = [];
+      const updatedObligations = prev.obligations.map((o) => {
+        const isDue = dueAutoObligations.some((d) => d.id === o.id);
+        if (!isDue) return o;
+
+        const isInst = Boolean(o.isInstallmentPlan && o.totalInstallments);
+        const nextPaidCount = isInst ? (o.paidInstallments || 0) + 1 : undefined;
+        const totalInst = o.totalInstallments || 1;
+        const completedAllInstallments = isInst && (nextPaidCount || 0) >= totalInst;
+
+        const txId = `tx-auto-${o.id}-${o.dueDate}-${Date.now()}`;
+        const desc = isInst
+          ? `${o.name} (Cuota automática ${nextPaidCount}/${totalInst})`
+          : `Cargo automático suscripción: ${o.name}`;
+
+        const autoTx: Transaction = {
+          id: txId,
+          type: TransactionType.EXPENSE,
+          categoryId: o.categoryId,
+          amount: Math.round(o.amount),
+          accountId: o.accountId,
+          date: o.dueDate,
+          description: desc,
+          linkedObligationId: o.id,
+          installmentInfo:
+            isInst && nextPaidCount
+              ? {
+                  current: nextPaidCount,
+                  total: totalInst,
+                  totalPurchaseAmount:
+                    o.installmentTotalAmount || Math.round(o.amount) * totalInst,
+                }
+              : undefined,
+          createdAt: new Date().toISOString(),
+        };
+        newTransactions.push(autoTx);
+
+        const paymentRec = {
+          id: `pay-auto-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          date: o.dueDate,
+          amountPaid: Math.round(o.amount),
+          estimatedAmount: Math.round(o.amount),
+          accountId: o.accountId,
+          transactionId: txId,
+          notes: isInst
+            ? `Cuota ${nextPaidCount}/${totalInst}`
+            : 'Cargo automático a tarjeta',
+        };
+
+        const nextDue = advanceDueDate(o.dueDate, o.frequency);
+        const pastEndDate = Boolean(o.endDate && nextDue > o.endDate);
+        const shouldFinish = completedAllInstallments || pastEndDate;
+
+        return {
+          ...o,
+          dueDate: shouldFinish ? o.dueDate : nextDue,
+          status: shouldFinish ? ObligationStatus.PAID : ObligationStatus.PENDING,
+          paidInstallments: nextPaidCount ?? o.paidInstallments,
+          lastPaidTransactionId: txId,
+          lastPaidDate: o.dueDate,
+          lastPaidAmount: Math.round(o.amount),
+          paymentHistory: [paymentRec, ...(o.paymentHistory || [])],
+        };
+      });
+
+      if (newTransactions.length === 0) return prev;
+      return {
+        ...prev,
+        transactions: [...newTransactions, ...prev.transactions],
+        obligations: updatedObligations,
+      };
+    });
+  }, [dbState.obligations]);
 
   // Apply Light / Dark / System Theme
   useEffect(() => {
@@ -106,7 +253,42 @@ export default function App() {
     setEditingTr(null);
     setQuickEntryMode(mode);
     setPreselectCatId(categoryId);
+    setPreselectAccId(undefined);
+    setInitialCardChargeType('SINGLE');
     setQuickEntryOpen(true);
+  };
+
+  const handleOpenCardAction = (accountId: string, chargeType: CardChargeType) => {
+    setEditingTx(null);
+    setEditingTr(null);
+    setQuickEntryMode('EXPENSE');
+    setPreselectAccId(accountId);
+    setInitialCardChargeType(chargeType);
+    if (chargeType === 'SUBSCRIPTION') {
+      const subCat = dbState.categories.find((c) => c.id === 'cat-suscripciones' && !c.isDeleted);
+      setPreselectCatId(subCat?.id);
+    } else if (chargeType === 'INSTALLMENTS') {
+      const instCat = dbState.categories.find((c) => c.id === 'cat-cuotas-tc' && !c.isDeleted);
+      setPreselectCatId(instCat?.id);
+    } else {
+      setPreselectCatId(undefined);
+    }
+    setQuickEntryOpen(true);
+  };
+
+  const handleCreateRecurringFromCard = (
+    oblData: Omit<RecurringObligation, 'id'>
+  ): string => {
+    const newId = `obl-card-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newObl: RecurringObligation = {
+      ...oblData,
+      id: newId,
+    };
+    setDbState((prev) => ({
+      ...prev,
+      obligations: [newObl, ...prev.obligations],
+    }));
+    return newId;
   };
 
   // 1. Movimientos (sin duplicar registros al editar)
@@ -377,44 +559,127 @@ export default function App() {
   const handlePayObligationById = (obligationId: string) => {
     const target = dbState.obligations.find((o) => o.id === obligationId);
     if (!target) return;
-    handlePayObligation(target);
+    setPayingObligation(target);
   };
 
   const handlePayObligation = (obligation: RecurringObligation) => {
-    const today = new Date().toISOString().split('T')[0];
+    setPayingObligation(obligation);
+  };
+
+  const handleConfirmObligationPayment = (payload: PayObligationPayload) => {
+    const {
+      obligation,
+      actualAmountPaid,
+      accountId,
+      paymentDate,
+      notes,
+      updateReferenceAmount,
+    } = payload;
+
     const txId = `tx-obl-${Date.now()}`;
+    const isInst = Boolean(obligation.isInstallmentPlan && obligation.totalInstallments);
+    const nextInstallmentNum = isInst
+      ? Math.min(obligation.totalInstallments || 1, (obligation.paidInstallments || 0) + 1)
+      : undefined;
+
+    const descBase = isInst
+      ? `${obligation.name} (Cuota ${nextInstallmentNum}/${obligation.totalInstallments})`
+      : obligation.isSubscription
+      ? `Suscripción TC: ${obligation.name}`
+      : obligation.isVariableAmount
+      ? `Pago cuenta variable: ${obligation.name}`
+      : `Pago recordatorio fijo: ${obligation.name}`;
+
     const newTx: Transaction = {
       id: txId,
       type: TransactionType.EXPENSE,
       categoryId: obligation.categoryId,
-      amount: obligation.amount,
-      accountId: obligation.accountId,
-      date: today,
-      description: `Pago de obligación fija: ${obligation.name}`,
+      amount: Math.round(actualAmountPaid),
+      accountId: accountId || obligation.accountId,
+      date: paymentDate,
+      description: notes ? `${descBase} (${notes})` : descBase,
       linkedObligationId: obligation.id,
+      installmentInfo:
+        isInst && nextInstallmentNum
+          ? {
+              current: nextInstallmentNum,
+              total: obligation.totalInstallments || 1,
+              totalPurchaseAmount:
+                obligation.installmentTotalAmount ||
+                Math.round(actualAmountPaid) * (obligation.totalInstallments || 1),
+            }
+          : undefined,
       createdAt: new Date().toISOString(),
+    };
+
+    const paymentRecord = {
+      id: `pay-${Date.now()}`,
+      date: paymentDate,
+      amountPaid: Math.round(actualAmountPaid),
+      estimatedAmount: obligation.amount,
+      accountId: accountId || obligation.accountId,
+      transactionId: txId,
+      notes: notes || undefined,
     };
 
     setDbState((prev) => {
       const updatedObligations = prev.obligations.map((o) => {
         if (o.id !== obligation.id) return o;
+        const nextHistory = [paymentRecord, ...(o.paymentHistory || [])];
+        const nextRefAmount = updateReferenceAmount
+          ? Math.round(actualAmountPaid)
+          : o.amount;
+
+        const nextPaidInst =
+          o.isInstallmentPlan && o.totalInstallments
+            ? (o.paidInstallments || 0) + 1
+            : o.paidInstallments;
+        const finishedInstallments = Boolean(
+          o.isInstallmentPlan &&
+            o.totalInstallments &&
+            (nextPaidInst || 0) >= o.totalInstallments
+        );
+
+        if (finishedInstallments) {
+          return {
+            ...o,
+            amount: nextRefAmount,
+            status: ObligationStatus.PAID,
+            paidInstallments: nextPaidInst,
+            lastPaidTransactionId: txId,
+            lastPaidDate: paymentDate,
+            lastPaidAmount: Math.round(actualAmountPaid),
+            paymentHistory: nextHistory,
+          };
+        }
+
         if (
           o.renewalRule === RenewalRule.AUTO_CREATE ||
           o.renewalRule === RenewalRule.ONLY_IF_PREVIOUS_PAID
         ) {
+          const nextDue = advanceDueDate(o.dueDate, o.frequency);
+          const pastEndDate = Boolean(o.endDate && nextDue > o.endDate);
           return {
             ...o,
-            dueDate: advanceDueDate(o.dueDate, o.frequency),
-            status: ObligationStatus.PENDING,
+            amount: nextRefAmount,
+            dueDate: pastEndDate ? o.dueDate : nextDue,
+            status: pastEndDate ? ObligationStatus.PAID : ObligationStatus.PENDING,
+            paidInstallments: nextPaidInst,
             lastPaidTransactionId: txId,
-            lastPaidDate: today,
+            lastPaidDate: paymentDate,
+            lastPaidAmount: Math.round(actualAmountPaid),
+            paymentHistory: nextHistory,
           };
         }
         return {
           ...o,
+          amount: nextRefAmount,
           status: ObligationStatus.PAID,
+          paidInstallments: nextPaidInst,
           lastPaidTransactionId: txId,
-          lastPaidDate: today,
+          lastPaidDate: paymentDate,
+          lastPaidAmount: Math.round(actualAmountPaid),
+          paymentHistory: nextHistory,
         };
       });
 
@@ -424,6 +689,20 @@ export default function App() {
         obligations: updatedObligations,
       };
     });
+
+    if (dbState.preferences.notificationsEnabled) {
+      sendNativeNotification({
+        title: `${dbState.preferences.assistantName || 'Gastito'}: Cuenta Pagada`,
+        body: `Se registró el pago de "${obligation.name}" por ${formatMoney(
+          actualAmountPaid,
+          dbState.preferences.currencySymbol
+        )} y se actualizó la estadística.`,
+        tag: `paid-obl-${obligation.id}-${Date.now()}`,
+        severity: 'success',
+        hapticEnabled: dbState.preferences.hapticFeedbackEnabled,
+        forceRepeat: true,
+      });
+    }
   };
 
   const handleDeleteObligation = (obligationId: string) => {
@@ -531,8 +810,105 @@ export default function App() {
         </div>
       </header>
 
+      {/* Floating Native Notification Banners */}
+      {activeToasts.length > 0 && (
+        <div className="fixed top-20 right-4 left-4 sm:left-auto sm:w-96 z-50 space-y-2 pointer-events-none">
+          {activeToasts.map((toast) => (
+            <div
+              key={toast.id}
+              className={`pointer-events-auto p-3.5 rounded-2xl border shadow-xl backdrop-blur-md flex items-start justify-between gap-3 transition-all ${
+                toast.severity === 'danger'
+                  ? 'bg-rose-950/95 border-rose-700 text-white'
+                  : toast.severity === 'warning'
+                  ? 'bg-amber-950/95 border-amber-700 text-white'
+                  : toast.severity === 'success'
+                  ? 'bg-emerald-950/95 border-emerald-700 text-white'
+                  : 'bg-stone-900/95 border-stone-700 text-white'
+              }`}
+            >
+              <div className="flex items-start gap-2.5 min-w-0">
+                {toast.severity === 'danger' || toast.severity === 'warning' ? (
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-xs font-bold leading-snug">{toast.title}</p>
+                  <p className="text-[11px] text-stone-200 mt-0.5 leading-relaxed">
+                    {toast.body}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveToasts((prev) => prev.filter((t) => t.id !== toast.id))
+                }
+                className="p-1 rounded-lg text-stone-300 hover:text-white shrink-0"
+                aria-label="Cerrar notificación"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Contenido Principal de la Pestaña Activa */}
       <main className="flex-1 max-w-3xl w-full mx-auto px-4 pt-5 pb-28">
+        {/* Banner de Solicitud de Permiso de Notificaciones Nativas */}
+        {dbState.preferences.notificationsEnabled &&
+          nativePerm === 'default' &&
+          !dismissedPermBanner && (
+            <div className="mb-5 p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/70 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-emerald-700 text-white flex items-center justify-center shrink-0">
+                  <Bell className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-stone-900 dark:text-zinc-100">
+                    Activar Permiso de Notificaciones Nativas
+                  </p>
+                  <p className="text-[11px] text-stone-600 dark:text-zinc-400">
+                    Autoriza las notificaciones en tu dispositivo para recibir alertas de presupuestos y vencimientos de pagos fijos.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    triggerHaptic(dbState.preferences.hapticFeedbackEnabled, 15);
+                    const perm = await requestNativeNotificationPermission();
+                    setNativePerm(perm);
+                    if (perm === 'granted') {
+                      sendNativeNotification({
+                        title: `${
+                          dbState.preferences.assistantName || 'Gastito'
+                        }: Notificaciones Activadas`,
+                        body: 'Las alertas nativas de presupuestos y pagos fijos están listas.',
+                        tag: `perm-banner-${Date.now()}`,
+                        severity: 'success',
+                        hapticEnabled: dbState.preferences.hapticFeedbackEnabled,
+                        forceRepeat: true,
+                      });
+                    }
+                  }}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors"
+                >
+                  Permitir Notificaciones
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDismissedPermBanner(true)}
+                  className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 dark:hover:text-zinc-200"
+                  aria-label="Ocultar aviso"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
         {activeTab === 'INICIO' && (
           <HomeTab
             preferences={dbState.preferences}
@@ -543,6 +919,7 @@ export default function App() {
             budgets={dbState.budgets}
             obligations={dbState.obligations}
             onOpenQuickEntry={handleOpenQuickEntry}
+            onOpenCardAction={handleOpenCardAction}
             onEditTransaction={(tx) => {
               setEditingTr(null);
               setEditingTx(tx);
@@ -580,13 +957,18 @@ export default function App() {
         {activeTab === 'CUENTAS' && (
           <AccountsTab
             accounts={dbState.accounts}
+            categories={dbState.categories}
             transactions={dbState.transactions}
             transfers={dbState.transfers}
+            obligations={dbState.obligations}
             currencySymbol={dbState.preferences.currencySymbol}
             hapticEnabled={dbState.preferences.hapticFeedbackEnabled}
             onSaveAccount={handleSaveAccount}
             onDeleteAccount={handleDeleteAccount}
             onOpenTransferModal={() => handleOpenQuickEntry('TRANSFER')}
+            onOpenCardActionModal={handleOpenCardAction}
+            onPayObligation={handlePayObligation}
+            onDeleteObligation={handleDeleteObligation}
             onEditTransfer={(tr) => {
               setEditingTx(null);
               setEditingTr(tr);
@@ -659,13 +1041,18 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Modal de Registro Ultrarrápido (Gasto / Ingreso / Transferencia) */}
+      {/* Modal de Registro Ultrarrápido (Gasto / Ingreso / Transferencia / Cuotas TC / Suscripciones TC) */}
       <QuickEntryModal
         isOpen={quickEntryOpen}
         initialMode={quickEntryMode}
         preselectCategoryId={preselectCatId}
+        preselectAccountId={preselectAccId}
+        initialCardChargeType={initialCardChargeType}
         categories={dbState.categories}
         accounts={dbState.accounts}
+        transactions={dbState.transactions}
+        transfers={dbState.transfers}
+        obligations={dbState.obligations}
         currencySymbol={dbState.preferences.currencySymbol}
         hapticEnabled={dbState.preferences.hapticFeedbackEnabled}
         editingTransaction={editingTx}
@@ -675,9 +1062,25 @@ export default function App() {
           setEditingTx(null);
           setEditingTr(null);
           setPreselectCatId(undefined);
+          setPreselectAccId(undefined);
+          setInitialCardChargeType('SINGLE');
         }}
         onSaveTransaction={handleSaveTransaction}
         onSaveTransfer={handleSaveTransfer}
+        onCreateRecurringFromCard={handleCreateRecurringFromCard}
+      />
+
+      {/* Modal para ingresar el monto exacto pagado en cuentas variables (Luz, Agua, GGCC) o pagos fijos */}
+      <PayObligationModal
+        isOpen={Boolean(payingObligation)}
+        obligation={payingObligation}
+        categories={dbState.categories}
+        accounts={dbState.accounts}
+        transactions={dbState.transactions}
+        currencySymbol={dbState.preferences.currencySymbol}
+        hapticEnabled={dbState.preferences.hapticFeedbackEnabled}
+        onClose={() => setPayingObligation(null)}
+        onConfirmPayment={handleConfirmObligationPayment}
       />
 
       {/* Modal de Configuración (⚙️ Arriba a la derecha) */}

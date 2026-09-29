@@ -719,24 +719,47 @@ export const FormalPdfReportModal: React.FC<FormalPdfReportModalProps> = ({
             {pdfSections.obligations && (
               <div className="space-y-1.5">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-stone-500">
-                  7. Pagos Fijos / Obligaciones ({obligations.length})
+                  7. Recordatorios y Cuentas Variables/Fijas ({obligations.length})
                 </h4>
                 {obligations.length === 0 ? (
                   <p className="text-xs text-stone-400 italic">Sin obligaciones registradas.</p>
                 ) : (
-                  obligations.map((o) => (
-                    <div
-                      key={o.id}
-                      className="flex justify-between text-xs border-b border-stone-100 py-1"
-                    >
-                      <span>
-                        {o.name} ({o.dueDate})
-                      </span>
-                      <span className="font-mono font-bold">
-                        {formatMoney(o.amount, currencySymbol)}
-                      </span>
-                    </div>
-                  ))
+                  obligations.map((o) => {
+                    const linkedRange = rangeTransactions.filter(
+                      (t) =>
+                        t.linkedObligationId === o.id &&
+                        t.type === TransactionType.EXPENSE
+                    );
+                    const paidInRange =
+                      linkedRange.length > 0
+                        ? linkedRange.reduce((s, t) => s + t.amount, 0)
+                        : (o.paymentHistory || [])
+                            .filter(
+                              (p) =>
+                                p.date >= pdfStartDate && p.date <= pdfEndDate
+                            )
+                            .reduce((s, p) => s + p.amountPaid, 0);
+                    return (
+                      <div
+                        key={o.id}
+                        className="flex justify-between items-center gap-2 text-xs border-b border-stone-100 py-1"
+                      >
+                        <span className="truncate">
+                          {o.name} ·{' '}
+                          <span className="text-stone-500">
+                            {o.isVariableAmount ? 'Variable' : 'Fijo'} (Vence {o.dueDate})
+                          </span>
+                        </span>
+                        <span className="font-mono font-bold shrink-0">
+                          Ref:{' '}
+                          {o.amount > 0
+                            ? formatMoney(o.amount, currencySymbol)
+                            : 'Var'}{' '}
+                          | Pagado: {formatMoney(paidInRange, currencySymbol)}
+                        </span>
+                      </div>
+                    );
+                  })
                 )}
               </div>
             )}

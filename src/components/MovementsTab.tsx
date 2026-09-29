@@ -410,9 +410,16 @@ export const MovementsTab: React.FC<MovementsTabProps> = ({
                         <CategoryIcon name={cat?.icon || 'CircleDollarSign'} size={18} />
                       </div>
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                          {cat?.name || 'Categoría archivada'}
-                          {cat?.isDeleted ? ' (Histórica)' : ''}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                            {cat?.name || 'Categoría archivada'}
+                            {cat?.isDeleted ? ' (Histórica)' : ''}
+                          </span>
+                          {tx.installmentInfo && tx.installmentInfo.total > 1 && (
+                            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-violet-100 dark:bg-violet-950/70 text-violet-800 dark:text-violet-300">
+                              Cuota {tx.installmentInfo.current}/{tx.installmentInfo.total}
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1.5 mt-0.5">
                           <span>{acc?.name || 'Cuenta'}</span>

@@ -1,23 +1,49 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Account,
   AccountTransfer,
+  AccountType,
   Category,
+  ObligationStatus,
+  RecurrenceFrequency,
+  RecurringObligation,
+  RenewalRule,
   Transaction,
   TransactionType,
 } from '../domain/models';
 import { CategoryIcon } from './GastitoLogo';
-import { formatMoney, triggerHaptic } from '../data/localRepository';
-import { X, Check, ArrowRightLeft, Calendar, FileText, Delete } from 'lucide-react';
+import {
+  calculateCreditCardMetrics,
+  calculateInstallmentEndDate,
+  formatMoney,
+  triggerHaptic,
+} from '../data/localRepository';
+import {
+  X,
+  Check,
+  ArrowRightLeft,
+  Calendar,
+  FileText,
+  Delete,
+  CreditCard,
+  Layers,
+  Repeat,
+} from 'lucide-react';
 
 export type QuickEntryMode = 'EXPENSE' | 'INCOME' | 'TRANSFER';
+export type CardChargeType = 'SINGLE' | 'INSTALLMENTS' | 'SUBSCRIPTION';
 
 interface QuickEntryModalProps {
   isOpen: boolean;
   initialMode: QuickEntryMode;
   preselectCategoryId?: string;
+  preselectAccountId?: string;
+  initialCardChargeType?: CardChargeType;
   categories: Category[];
   accounts: Account[];
+  transactions?: Transaction[];
+  transfers?: AccountTransfer[];
+  obligations?: RecurringObligation[];
   currencySymbol: string;
   hapticEnabled: boolean;
   editingTransaction?: Transaction | null;
@@ -25,14 +51,31 @@ interface QuickEntryModalProps {
   onClose: () => void;
   onSaveTransaction: (tx: Omit<Transaction, 'id' | 'createdAt'>, existingId?: string) => void;
   onSaveTransfer: (tr: Omit<AccountTransfer, 'id' | 'createdAt'>, existingId?: string) => void;
+  onCreateRecurringFromCard?: (obl: Omit<RecurringObligation, 'id'>) => string;
+}
+
+function addOneMonth(dateStr: string): string {
+  const d = new Date(`${dateStr}T12:00:00`);
+  if (Number.isNaN(d.getTime())) {
+    const f = new Date();
+    f.setMonth(f.getMonth() + 1);
+    return f.toISOString().split('T')[0];
+  }
+  d.setMonth(d.getMonth() + 1);
+  return d.toISOString().split('T')[0];
 }
 
 export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
   isOpen,
   initialMode,
   preselectCategoryId,
+  preselectAccountId,
+  initialCardChargeType = 'SINGLE',
   categories,
   accounts,
+  transactions = [],
+  transfers = [],
+  obligations = [],
   currencySymbol,
   hapticEnabled,
   editingTransaction,
@@ -40,6 +83,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
   onClose,
   onSaveTransaction,
   onSaveTransfer,
+  onCreateRecurringFromCard,
 }) => {
   const activeAccounts = accounts.filter((a) => !a.isArchived);
   const todayStr = new Date().toISOString().split('T')[0];
@@ -57,6 +101,11 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
   const [date, setDate] = useState<string>(todayStr);
   const [description, setDescription] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
+
+  // Opciones específicas cuando se paga con Tarjeta de Crédito (Contado, En Cuotas o Suscripción)
+  const [cardChargeType, setCardChargeType] = useState<CardChargeType>('SINGLE');
+  const [installmentsCount, setInstallmentsCount] = useState<number>(3);
+  const [amountInputBasis, setAmountInputBasis] = useState<'TOTAL' | 'PER_INSTALLMENT'>('TOTAL');
 
   const availableCategories = categories.filter(
     (c) =>
@@ -79,6 +128,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
       setSelectedAccountId(editingTransaction.accountId);
       setDate(editingTransaction.date);
       setDescription(editingTransaction.description);
+      setCardChargeType('SINGLE');
       setStep('DETAILS');
     } else if (editingTransfer) {
       setMode('TRANSFER');
@@ -87,19 +137,39 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
       setAmountStr(String(editingTransfer.amount));
       setDate(editingTransfer.date);
       setDescription(editingTransfer.description);
+      setCardChargeType('SINGLE');
       setStep('DETAILS');
     } else {
       setMode(initialMode);
       setAmountStr('');
       setDate(todayStr);
       setDescription('');
-      setSelectedAccountId(activeAccounts[0]?.id || 'acc-efectivo-default');
+      setCardChargeType(initialCardChargeType);
+      setInstallmentsCount(3);
+      setAmountInputBasis('TOTAL');
+
+      const defaultAccId =
+        preselectAccountId || activeAccounts[0]?.id || 'acc-efectivo-default';
+      setSelectedAccountId(defaultAccId);
       setToAccountId(activeAccounts[1]?.id || activeAccounts[0]?.id || 'acc-efectivo-default');
 
       if (initialMode === 'TRANSFER') {
         setStep('DETAILS');
       } else if (preselectCategoryId) {
         setSelectedCategoryId(preselectCategoryId);
+        setStep('DETAILS');
+      } else if (preselectAccountId && initialCardChargeType !== 'SINGLE') {
+        const defaultCat =
+          initialCardChargeType === 'SUBSCRIPTION'
+            ? categories.find((c) => c.id === 'cat-suscripciones' && !c.isDeleted)?.id
+            : categories.find((c) => c.id === 'cat-cuotas-tc' && !c.isDeleted)?.id;
+        const filtered = categories.filter(
+          (c) =>
+            !c.isDeleted &&
+            c.isActive &&
+            (c.type === TransactionType.EXPENSE || c.type === 'BOTH')
+        );
+        setSelectedCategoryId(defaultCat || filtered[0]?.id || '');
         setStep('DETAILS');
       } else {
         const filtered = categories.filter(
@@ -114,9 +184,73 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
         setStep('CATEGORY');
       }
     }
-  }, [isOpen, initialMode, preselectCategoryId, editingTransaction, editingTransfer]);
+  }, [
+    isOpen,
+    initialMode,
+    preselectCategoryId,
+    preselectAccountId,
+    initialCardChargeType,
+    editingTransaction,
+    editingTransfer,
+  ]);
+
+  const selectedAccObj = useMemo(
+    () => accounts.find((a) => a.id === selectedAccountId),
+    [accounts, selectedAccountId]
+  );
+
+  const isCreditCardSelected =
+    mode === 'EXPENSE' &&
+    !editingTransaction &&
+    selectedAccObj?.type === AccountType.CREDIT;
+
+  const creditCardMetrics = useMemo(() => {
+    if (!selectedAccObj || selectedAccObj.type !== AccountType.CREDIT) return null;
+    return calculateCreditCardMetrics(
+      selectedAccObj,
+      transactions,
+      transfers,
+      obligations
+    );
+  }, [selectedAccObj, transactions, transfers, obligations]);
 
   if (!isOpen) return null;
+
+  const rawEnteredNumber = Math.round(parseFloat(amountStr) || 0);
+  const validMonths = Math.max(2, Math.min(60, Math.round(installmentsCount || 3)));
+
+  // Cálculos de cuotas cuando está seleccionada una tarjeta de crédito y modo INSTALLMENTS
+  const installmentCalc = (() => {
+    if (!isCreditCardSelected || cardChargeType !== 'INSTALLMENTS') {
+      return {
+        monthlyInstallmentAmount: rawEnteredNumber,
+        totalPurchaseAmount: rawEnteredNumber,
+        futureCommittedAmount: 0,
+        endDateStr: date || todayStr,
+      };
+    }
+    if (amountInputBasis === 'TOTAL') {
+      const monthly = rawEnteredNumber > 0 ? Math.max(1, Math.round(rawEnteredNumber / validMonths)) : 0;
+      const total = rawEnteredNumber;
+      const future = monthly * Math.max(0, validMonths - 1);
+      return {
+        monthlyInstallmentAmount: monthly,
+        totalPurchaseAmount: total,
+        futureCommittedAmount: future,
+        endDateStr: calculateInstallmentEndDate(date || todayStr, validMonths - 1),
+      };
+    } else {
+      const monthly = rawEnteredNumber;
+      const total = monthly * validMonths;
+      const future = monthly * Math.max(0, validMonths - 1);
+      return {
+        monthlyInstallmentAmount: monthly,
+        totalPurchaseAmount: total,
+        futureCommittedAmount: future,
+        endDateStr: calculateInstallmentEndDate(date || todayStr, validMonths - 1),
+      };
+    }
+  })();
 
   const handleSelectCategory = (catId: string) => {
     triggerHaptic(hapticEnabled, 12);
@@ -188,13 +322,108 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
     }
 
     triggerHaptic(hapticEnabled, 20);
+    const txDate = date || todayStr;
+    const catObj = categories.find((c) => c.id === selectedCategoryId);
+    const baseDesc = description.trim() || catObj?.name || 'Compra con tarjeta';
+
+    // Caso 1: Compra en Cuotas con Tarjeta de Crédito (genera Cuota 1/N hoy + Gasto Fijo mensual con término)
+    if (isCreditCardSelected && cardChargeType === 'INSTALLMENTS') {
+      const monthlyAmt = installmentCalc.monthlyInstallmentAmount;
+      const totalPurchase = installmentCalc.totalPurchaseAmount;
+      const nextDueDate = addOneMonth(txDate);
+      const endDateStr = installmentCalc.endDateStr;
+
+      let createdOblId: string | undefined;
+      if (onCreateRecurringFromCard) {
+        createdOblId = onCreateRecurringFromCard({
+          name: `${baseDesc} (${validMonths} cuotas)`,
+          categoryId: selectedCategoryId,
+          amount: monthlyAmt,
+          isVariableAmount: false,
+          isInstallmentPlan: true,
+          totalInstallments: validMonths,
+          paidInstallments: 1,
+          installmentTotalAmount: totalPurchase,
+          endDate: endDateStr,
+          autoChargeCard: true,
+          accountId: selectedAccountId,
+          dueDate: nextDueDate,
+          frequency: RecurrenceFrequency.MONTHLY,
+          renewalRule: RenewalRule.AUTO_CREATE,
+          notificationsEnabled: true,
+          status: ObligationStatus.PENDING,
+          lastPaidDate: txDate,
+          lastPaidAmount: monthlyAmt,
+        });
+      }
+
+      onSaveTransaction({
+        type: TransactionType.EXPENSE,
+        categoryId: selectedCategoryId,
+        amount: monthlyAmt,
+        accountId: selectedAccountId,
+        date: txDate,
+        description: `${baseDesc} · Cuota 1/${validMonths} (Total: ${formatMoney(
+          totalPurchase,
+          currencySymbol
+        )})`,
+        linkedObligationId: createdOblId,
+        installmentInfo: {
+          current: 1,
+          total: validMonths,
+          totalPurchaseAmount: totalPurchase,
+        },
+      });
+      onClose();
+      return;
+    }
+
+    // Caso 2: Suscripción Automática en Tarjeta de Crédito
+    if (isCreditCardSelected && cardChargeType === 'SUBSCRIPTION') {
+      const subAmt = Math.round(numericAmount);
+      const nextDueDate = addOneMonth(txDate);
+      let createdOblId: string | undefined;
+
+      if (onCreateRecurringFromCard) {
+        createdOblId = onCreateRecurringFromCard({
+          name: baseDesc,
+          categoryId: selectedCategoryId,
+          amount: subAmt,
+          isVariableAmount: false,
+          isSubscription: true,
+          autoChargeCard: true,
+          accountId: selectedAccountId,
+          dueDate: nextDueDate,
+          frequency: RecurrenceFrequency.MONTHLY,
+          renewalRule: RenewalRule.AUTO_CREATE,
+          notificationsEnabled: true,
+          status: ObligationStatus.PENDING,
+          lastPaidDate: txDate,
+          lastPaidAmount: subAmt,
+        });
+      }
+
+      onSaveTransaction({
+        type: TransactionType.EXPENSE,
+        categoryId: selectedCategoryId,
+        amount: subAmt,
+        accountId: selectedAccountId,
+        date: txDate,
+        description: `Suscripción en tarjeta: ${baseDesc}`,
+        linkedObligationId: createdOblId,
+      });
+      onClose();
+      return;
+    }
+
+    // Caso 3: Gasto o Ingreso normal
     onSaveTransaction(
       {
         type: mode === 'EXPENSE' ? TransactionType.EXPENSE : TransactionType.INCOME,
         categoryId: selectedCategoryId,
         amount: Math.round(numericAmount),
         accountId: selectedAccountId,
-        date: date || todayStr,
+        date: txDate,
         description: description.trim(),
       },
       editingTransaction?.id
@@ -206,7 +435,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs p-0 sm:p-4">
-      <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden flex flex-col max-h-[94vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
@@ -276,7 +505,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="overflow-y-auto p-5 space-y-5">
+        <div className="overflow-y-auto p-5 space-y-4">
           {mode !== 'TRANSFER' && step === 'CATEGORY' ? (
             <div>
               <div className="flex items-center justify-between mb-3">
@@ -346,12 +575,16 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                 <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
                   <span>
                     {mode === 'EXPENSE'
-                      ? 'Monto del gasto'
+                      ? isCreditCardSelected && cardChargeType === 'INSTALLMENTS'
+                        ? amountInputBasis === 'TOTAL'
+                          ? 'Monto total de la compra en cuotas'
+                          : 'Valor de cada cuota mensual'
+                        : 'Monto del gasto'
                       : mode === 'INCOME'
                       ? 'Monto del ingreso'
                       : 'Monto a transferir'}
                   </span>
-                  <span>Teclado numérico nativo</span>
+                  <span>Sin centavos</span>
                 </div>
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="text-2xl font-mono-num text-slate-400">{currencySymbol}</span>
@@ -389,7 +622,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                       }}
                       className={`${
                         key === '00' ? 'col-span-2' : ''
-                      } min-h-[44px] rounded-xl font-mono-num text-base font-semibold border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/70 text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-[0.97] transition-all flex items-center justify-center`}
+                      } min-h-[42px] rounded-xl font-mono-num text-base font-semibold border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/70 text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-[0.97] transition-all flex items-center justify-center`}
                     >
                       {key === 'BACK' ? (
                         <Delete size={18} />
@@ -444,7 +677,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
               ) : (
                 <div>
                   <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1.5">
-                    Cuenta
+                    Cuenta de pago (Selecciona una Tarjeta de Crédito para pagar en Cuotas o Suscripción)
                   </label>
                   <div className="flex items-center gap-2 overflow-x-auto pb-1">
                     {activeAccounts.length === 0 ? (
@@ -458,6 +691,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                     ) : (
                       activeAccounts.map((acc) => {
                         const active = acc.id === selectedAccountId;
+                        const isCC = acc.type === AccountType.CREDIT;
                         return (
                           <button
                             key={acc.id}
@@ -466,13 +700,14 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                               triggerHaptic(hapticEnabled, 10);
                               setSelectedAccountId(acc.id);
                             }}
-                            className={`px-3.5 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap transition-colors min-h-[42px] ${
+                            className={`px-3.5 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap transition-colors min-h-[42px] flex items-center gap-1.5 ${
                               active
                                 ? 'bg-slate-900 text-white border-slate-900 dark:bg-white dark:text-slate-900 dark:border-white'
                                 : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-slate-300'
                             }`}
                           >
-                            {acc.name}
+                            {isCC && <CreditCard size={14} />}
+                            <span>{acc.name}</span>
                           </button>
                         );
                       })
@@ -481,12 +716,167 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                 </div>
               )}
 
+              {/* PANEL ESPECIAL DE TARJETA DE CRÉDITO: CUPO DISPONIBLE + PAGO EN CUOTAS O SUSCRIPCIÓN */}
+              {isCreditCardSelected && creditCardMetrics && (
+                <div className="p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/25 border border-indigo-200 dark:border-indigo-900/60 space-y-3.5">
+                  {/* Resumen de Cupo de la Tarjeta */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-1.5 font-bold text-indigo-900 dark:text-indigo-200">
+                      <CreditCard size={15} className="text-indigo-600 dark:text-indigo-400" />
+                      <span>{selectedAccObj?.name}</span>
+                    </div>
+                    <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                      Disponible:{' '}
+                      <strong className="text-emerald-700 dark:text-emerald-400">
+                        {formatMoney(creditCardMetrics.availableCredit, currencySymbol)}
+                      </strong>{' '}
+                      / Cupo: {formatMoney(creditCardMetrics.creditLimit, currencySymbol)}
+                    </div>
+                  </div>
+
+                  {/* Selector de Modalidad de Cargo en la Tarjeta */}
+                  <div className="grid grid-cols-3 gap-1.5 p-1 bg-white dark:bg-slate-900 rounded-xl border border-indigo-200/80 dark:border-indigo-900/60">
+                    <button
+                      type="button"
+                      onClick={() => setCardChargeType('SINGLE')}
+                      className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all ${
+                        cardChargeType === 'SINGLE'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      1 Cuota / Contado
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCardChargeType('INSTALLMENTS')}
+                      className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-all ${
+                        cardChargeType === 'INSTALLMENTS'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      <Layers size={12} />
+                      En Cuotas
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCardChargeType('SUBSCRIPTION')}
+                      className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-all ${
+                        cardChargeType === 'SUBSCRIPTION'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      <Repeat size={12} />
+                      Suscripción
+                    </button>
+                  </div>
+
+                  {/* Configuración detallada cuando se elige "En Cuotas" */}
+                  {cardChargeType === 'INSTALLMENTS' && (
+                    <div className="space-y-3 pt-1 border-t border-indigo-200/60 dark:border-indigo-900/50">
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAmountInputBasis('TOTAL')}
+                          className={`py-1.5 px-2.5 rounded-lg text-[11px] font-semibold border transition-all ${
+                            amountInputBasis === 'TOTAL'
+                              ? 'bg-indigo-100 dark:bg-indigo-950/80 border-indigo-400 text-indigo-900 dark:text-indigo-200'
+                              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          Ingresé el Total Compra
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAmountInputBasis('PER_INSTALLMENT')}
+                          className={`py-1.5 px-2.5 rounded-lg text-[11px] font-semibold border transition-all ${
+                            amountInputBasis === 'PER_INSTALLMENT'
+                              ? 'bg-indigo-100 dark:bg-indigo-950/80 border-indigo-400 text-indigo-900 dark:text-indigo-200'
+                              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          Ingresé Valor de 1 Cuota
+                        </button>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                          Número de Cuotas / Meses (Gasto fijo con fecha de término):
+                        </label>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {[3, 6, 12, 18, 24].map((n) => (
+                            <button
+                              key={n}
+                              type="button"
+                              onClick={() => setInstallmentsCount(n)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold border transition-all ${
+                                installmentsCount === n
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800'
+                              }`}
+                            >
+                              {n}m
+                            </button>
+                          ))}
+                          <div className="flex items-center gap-1 ml-auto">
+                            <span className="text-[11px] text-slate-500">Otra:</span>
+                            <input
+                              type="number"
+                              min="2"
+                              max="60"
+                              value={installmentsCount}
+                              onChange={(e) =>
+                                setInstallmentsCount(
+                                  Math.max(2, Math.min(60, parseInt(e.target.value, 10) || 2))
+                                )
+                              }
+                              className="w-16 px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs font-mono font-bold text-center"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Resumen en vivo de la compra en cuotas */}
+                      <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-indigo-200/80 dark:border-indigo-900/60 text-xs space-y-1 font-mono">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Cuota fija mensual ({validMonths} meses):</span>
+                          <strong className="text-indigo-700 dark:text-indigo-400">
+                            {formatMoney(installmentCalc.monthlyInstallmentAmount, currencySymbol)} / mes
+                          </strong>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Total comprometido en cupo:</span>
+                          <strong className="text-slate-900 dark:text-white">
+                            {formatMoney(installmentCalc.totalPurchaseAmount, currencySymbol)}
+                          </strong>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Término automático de cuotas:</span>
+                          <strong className="text-emerald-700 dark:text-emerald-400">
+                            {installmentCalc.endDateStr}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Explicación cuando se elige "Suscripción" */}
+                  {cardChargeType === 'SUBSCRIPTION' && (
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300 pt-1 border-t border-indigo-200/60 dark:border-indigo-900/50">
+                      Se registrará el cobro de hoy y quedará guardada en <strong>Suscripciones de tu Tarjeta</strong> para cargarse automáticamente cada mes en esta misma fecha.
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Date and Optional Description */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
                     <Calendar size={13} />
-                    <span>Fecha (cualquier día)</span>
+                    <span>Fecha del cargo</span>
                   </label>
                   <input
                     type="date"
@@ -498,13 +888,25 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                 <div>
                   <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
                     <FileText size={13} />
-                    <span>Descripción (opcional)</span>
+                    <span>
+                      {isCreditCardSelected && cardChargeType === 'SUBSCRIPTION'
+                        ? 'Nombre de la suscripción'
+                        : isCreditCardSelected && cardChargeType === 'INSTALLMENTS'
+                        ? 'Detalle de la compra en cuotas'
+                        : 'Descripción (opcional)'}
+                    </span>
                   </label>
                   <input
                     type="text"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Ej. Almuerzo, factura, nota..."
+                    placeholder={
+                      isCreditCardSelected && cardChargeType === 'SUBSCRIPTION'
+                        ? 'Ej. Netflix, Spotify, iCloud, Gimnasio...'
+                        : isCreditCardSelected && cardChargeType === 'INSTALLMENTS'
+                        ? 'Ej. Notebook, Refrigerador, Pasajes...'
+                        : 'Ej. Almuerzo, factura, nota...'
+                    }
                     className="w-full h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-white"
                   />
                 </div>
@@ -521,7 +923,9 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                 type="submit"
                 className={`w-full min-h-[48px] rounded-xl font-semibold text-sm text-white flex items-center justify-center gap-2 shadow-md transition-transform active:scale-[0.99] ${
                   mode === 'EXPENSE'
-                    ? 'bg-rose-600 hover:bg-rose-700'
+                    ? isCreditCardSelected && cardChargeType !== 'SINGLE'
+                      ? 'bg-indigo-600 hover:bg-indigo-700'
+                      : 'bg-rose-600 hover:bg-rose-700'
                     : mode === 'INCOME'
                     ? 'bg-emerald-600 hover:bg-emerald-700'
                     : 'bg-sky-600 hover:bg-sky-700'
@@ -532,20 +936,30 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                   {editingTransaction || editingTransfer
                     ? 'Guardar cambios'
                     : mode === 'EXPENSE'
-                    ? `Registrar gasto ${
-                        parseFloat(amountStr) > 0
-                          ? formatMoney(parseFloat(amountStr), currencySymbol)
-                          : ''
-                      }`
+                    ? isCreditCardSelected && cardChargeType === 'INSTALLMENTS'
+                      ? `Registrar Cuota 1/${validMonths} (${formatMoney(
+                          installmentCalc.monthlyInstallmentAmount,
+                          currencySymbol
+                        )}/mes)`
+                      : isCreditCardSelected && cardChargeType === 'SUBSCRIPTION'
+                      ? `Activar Suscripción en Tarjeta (${formatMoney(
+                          rawEnteredNumber,
+                          currencySymbol
+                        )}/mes)`
+                      : `Registrar gasto ${
+                          rawEnteredNumber > 0
+                            ? formatMoney(rawEnteredNumber, currencySymbol)
+                            : ''
+                        }`
                     : mode === 'INCOME'
                     ? `Registrar ingreso ${
-                        parseFloat(amountStr) > 0
-                          ? formatMoney(parseFloat(amountStr), currencySymbol)
+                        rawEnteredNumber > 0
+                          ? formatMoney(rawEnteredNumber, currencySymbol)
                           : ''
                       }`
                     : `Transferir ${
-                        parseFloat(amountStr) > 0
-                          ? formatMoney(parseFloat(amountStr), currencySymbol)
+                        rawEnteredNumber > 0
+                          ? formatMoney(rawEnteredNumber, currencySymbol)
                           : ''
                       }`}
                 </span>

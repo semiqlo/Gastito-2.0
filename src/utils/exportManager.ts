@@ -3,7 +3,11 @@ import {
   TransactionType,
   DebtType,
 } from '../domain/models';
-import { calculateAccountBalance, formatMoney } from '../data/localRepository';
+import {
+  calculateAccountBalance,
+  calculateCreditCardMetrics,
+  formatMoney,
+} from '../data/localRepository';
 import {
   calculateStatisticalMetrics,
   EconomicIndicatorsData,
@@ -150,15 +154,34 @@ export function exportToMultiSheetExcel(
   // 3. Cuentas
   const cuentasSheet = buildWorksheet(
     'Cuentas',
-    ['Titular', 'Nombre Cuenta', 'Tipo', 'Saldo Inicial', 'Saldo Actual', 'Información Adicional'],
-    accounts.map((a) => [
-      configuredUserName,
-      a.name,
-      a.type,
-      Number(a.initialBalance.toFixed(2)),
-      calculateAccountBalance(a, transactions, transfers),
-      a.additionalInfo || '',
-    ])
+    [
+      'Titular',
+      'Nombre Cuenta',
+      'Tipo',
+      'Saldo Inicial',
+      'Saldo Actual',
+      'Cupo Total TC',
+      'Cupo Utilizado TC',
+      'Cupo Disponible para Gastar',
+      'Información Adicional',
+    ],
+    accounts.map((a) => {
+      const isCredit = a.type === 'CREDIT';
+      const ccMetrics = isCredit
+        ? calculateCreditCardMetrics(a, transactions, transfers, obligations)
+        : null;
+      return [
+        configuredUserName,
+        a.name,
+        a.type,
+        Math.round(a.initialBalance),
+        Math.round(calculateAccountBalance(a, transactions, transfers)),
+        ccMetrics ? Math.round(ccMetrics.creditLimit) : '',
+        ccMetrics ? Math.round(ccMetrics.totalUsedCredit) : '',
+        ccMetrics ? Math.round(ccMetrics.availableCredit) : '',
+        a.additionalInfo || '',
+      ];
+    })
   );
 
   // 4. Transferencias
@@ -216,29 +239,63 @@ export function exportToMultiSheetExcel(
     })
   );
 
-  // 7. Pagos recurrentes
+  // 7. Pagos recurrentes / Recordatorios de Cuentas Variables, Fijas, Cuotas TC y Suscripciones
   const recurrentesSheet = buildWorksheet(
     'Pagos recurrentes',
     [
-      'Nombre Obligación',
+      'Nombre Recordatorio / Cuenta',
+      'Modalidad',
       'Categoría',
-      'Monto',
+      'Monto Mensual / Referencial',
+      'Cuotas (Pagadas/Total)',
+      'Fecha Término Cuotas',
+      'Último Monto Pagado',
+      'Promedio Histórico (μ)',
+      'Desv. Estándar (σ)',
       'Cuenta',
-      'Fecha Límite',
+      'Próximo Vencimiento',
       'Periodicidad',
-      'Regla Renovación',
       'Estado',
     ],
-    obligations.map((o) => [
-      o.name,
-      catMap.get(o.categoryId) || o.categoryId,
-      Number(o.amount.toFixed(2)),
-      accMap.get(o.accountId) || o.accountId,
-      o.dueDate,
-      o.frequency,
-      o.renewalRule,
-      o.status === 'PAID' ? 'Gasto Pagado' : 'Obligación Pendiente',
-    ])
+    obligations.map((o) => {
+      const linkedAll = transactions.filter(
+        (t) =>
+          t.linkedObligationId === o.id && t.type === TransactionType.EXPENSE
+      );
+      const histVals =
+        linkedAll.length > 0
+          ? linkedAll.map((t) => t.amount)
+          : (o.paymentHistory || []).map((p) => p.amountPaid);
+      const st = calculateStatisticalMetrics(histVals);
+      const lastPaid =
+        o.lastPaidAmount ?? (linkedAll.length > 0 ? linkedAll[0].amount : 0);
+
+      const modeLabel = o.isInstallmentPlan
+        ? 'Compra en Cuotas TC'
+        : o.isSubscription
+        ? 'Suscripción Automática TC'
+        : o.isVariableAmount
+        ? 'Monto Variable (Cuenta)'
+        : 'Monto Fijo';
+
+      return [
+        o.name,
+        modeLabel,
+        catMap.get(o.categoryId) || o.categoryId,
+        Math.round(o.amount),
+        o.isInstallmentPlan
+          ? `${o.paidInstallments || 0}/${o.totalInstallments || 1}`
+          : 'N/A',
+        o.endDate || 'Indefinido',
+        Math.round(lastPaid),
+        Math.round(st.mean),
+        Math.round(st.stdDev),
+        accMap.get(o.accountId) || o.accountId,
+        o.dueDate,
+        o.frequency,
+        o.status === 'PAID' ? 'Completado / Pagado' : 'Activo / Pendiente',
+      ];
+    })
   );
 
   // 8. Categorías

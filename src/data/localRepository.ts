@@ -33,9 +33,13 @@ export const INITIAL_CATEGORIES: Category[] = [
   { id: 'cat-salud', name: 'Salud', icon: 'HeartPulse', type: TransactionType.EXPENSE, color: '#E11D48', isActive: true, isDeleted: false },
   { id: 'cat-vivienda', name: 'Vivienda', icon: 'Home', type: TransactionType.EXPENSE, color: '#0D9488', isActive: true, isDeleted: false },
   { id: 'cat-arriendo', name: 'Arriendo', icon: 'Key', type: TransactionType.EXPENSE, color: '#0F766E', isActive: true, isDeleted: false },
+  { id: 'cat-gastos-comunes', name: 'Gastos Comunes', icon: 'Home', type: TransactionType.EXPENSE, color: '#0891B2', isActive: true, isDeleted: false },
   { id: 'cat-luz', name: 'Luz', icon: 'Zap', type: TransactionType.EXPENSE, color: '#CA8A04', isActive: true, isDeleted: false },
   { id: 'cat-agua', name: 'Agua', icon: 'Droplets', type: TransactionType.EXPENSE, color: '#0369A1', isActive: true, isDeleted: false },
+  { id: 'cat-gas', name: 'Gas', icon: 'Sparkles', type: TransactionType.EXPENSE, color: '#EA580C', isActive: true, isDeleted: false },
   { id: 'cat-internet', name: 'Internet', icon: 'Wifi', type: TransactionType.EXPENSE, color: '#6366F1', isActive: true, isDeleted: false },
+  { id: 'cat-suscripciones', name: 'Suscripciones', icon: 'Film', type: TransactionType.EXPENSE, color: '#8B5CF6', isActive: true, isDeleted: false },
+  { id: 'cat-cuotas-tc', name: 'Compras en Cuotas', icon: 'CreditCard', type: TransactionType.EXPENSE, color: '#4F46E5', isActive: true, isDeleted: false },
   { id: 'cat-compras-web', name: 'Compras por Internet', icon: 'Globe', type: TransactionType.EXPENSE, color: '#7C3AED', isActive: true, isDeleted: false },
   { id: 'cat-entretenimiento', name: 'Entretenimiento', icon: 'Film', type: TransactionType.EXPENSE, color: '#DB2777', isActive: true, isDeleted: false },
   { id: 'cat-mascotas', name: 'Mascotas', icon: 'PawPrint', type: TransactionType.EXPENSE, color: '#B45309', isActive: true, isDeleted: false },
@@ -101,7 +105,10 @@ export function createSeedDatabase(): AppDatabaseState {
       id: 'acc-tc',
       name: 'Tarjeta Crédito Oro',
       type: AccountType.CREDIT,
-      initialBalance: 0.0,
+      initialBalance: 0,
+      creditLimit: 2500,
+      billingDay: 18,
+      paymentDueDay: 5,
       additionalInfo: 'Corte día 18 · Pago límite día 5',
       isArchived: false,
       createdAt: fiveDaysAgo,
@@ -173,10 +180,11 @@ export function createSeedDatabase(): AppDatabaseState {
       id: 'tx-7',
       type: TransactionType.EXPENSE,
       categoryId: 'cat-luz',
-      amount: 48.0,
+      amount: 48,
       accountId: 'acc-banco-principal',
       date: lastMonthDay18,
       description: 'Cuenta de electricidad mes pasado',
+      linkedObligationId: 'obl-luz',
       createdAt: lastMonthDay18,
     },
     {
@@ -278,7 +286,8 @@ export function createSeedDatabase(): AppDatabaseState {
       id: 'obl-arriendo',
       name: 'Arriendo Departamento',
       categoryId: 'cat-arriendo',
-      amount: 650.0,
+      amount: 650,
+      isVariableAmount: false,
       accountId: 'acc-banco-principal',
       dueDate: inThreeDays,
       frequency: RecurrenceFrequency.MONTHLY,
@@ -288,13 +297,90 @@ export function createSeedDatabase(): AppDatabaseState {
     },
     {
       id: 'obl-luz',
-      name: 'Recibo de Luz Eléctrica',
+      name: 'Cuenta de Luz Eléctrica',
       categoryId: 'cat-luz',
-      amount: 52.0,
+      amount: 50,
+      isVariableAmount: true,
       accountId: 'acc-banco-principal',
       dueDate: inSevenDays,
       frequency: RecurrenceFrequency.MONTHLY,
-      renewalRule: RenewalRule.ASK_BEFORE,
+      renewalRule: RenewalRule.ONLY_IF_PREVIOUS_PAID,
+      notificationsEnabled: true,
+      status: ObligationStatus.PENDING,
+      lastPaidTransactionId: 'tx-7',
+      lastPaidDate: lastMonthDay18,
+      lastPaidAmount: 48,
+      paymentHistory: [
+        {
+          id: 'pay-hist-luz-1',
+          date: lastMonthDay18,
+          amountPaid: 48,
+          estimatedAmount: 50,
+          accountId: 'acc-banco-principal',
+          transactionId: 'tx-7',
+          notes: 'Cuenta de electricidad mes pasado',
+        },
+      ],
+    },
+    {
+      id: 'obl-agua',
+      name: 'Cuenta de Agua Potable',
+      categoryId: 'cat-agua',
+      amount: 22,
+      isVariableAmount: true,
+      accountId: 'acc-banco-principal',
+      dueDate: inSevenDays,
+      frequency: RecurrenceFrequency.MONTHLY,
+      renewalRule: RenewalRule.ONLY_IF_PREVIOUS_PAID,
+      notificationsEnabled: true,
+      status: ObligationStatus.PENDING,
+    },
+    {
+      id: 'obl-gastos-comunes',
+      name: 'Gastos Comunes',
+      categoryId: 'cat-gastos-comunes',
+      amount: 85,
+      isVariableAmount: true,
+      accountId: 'acc-banco-principal',
+      dueDate: inThreeDays,
+      frequency: RecurrenceFrequency.MONTHLY,
+      renewalRule: RenewalRule.ONLY_IF_PREVIOUS_PAID,
+      notificationsEnabled: true,
+      status: ObligationStatus.PENDING,
+    },
+    {
+      id: 'obl-cuota-tc-1',
+      name: 'Equipamiento / Tecnología (En Cuotas)',
+      categoryId: 'cat-cuotas-tc',
+      amount: 65,
+      isVariableAmount: false,
+      isInstallmentPlan: true,
+      totalInstallments: 6,
+      paidInstallments: 1,
+      installmentTotalAmount: 390,
+      endDate: calculateInstallmentEndDate(today, 5),
+      autoChargeCard: true,
+      accountId: 'acc-tc',
+      dueDate: inSevenDays,
+      frequency: RecurrenceFrequency.MONTHLY,
+      renewalRule: RenewalRule.AUTO_CREATE,
+      notificationsEnabled: true,
+      status: ObligationStatus.PENDING,
+      lastPaidDate: today,
+      lastPaidAmount: 65,
+    },
+    {
+      id: 'obl-sub-streaming',
+      name: 'Spotify + Streaming Familiar',
+      categoryId: 'cat-suscripciones',
+      amount: 15,
+      isVariableAmount: false,
+      isSubscription: true,
+      autoChargeCard: true,
+      accountId: 'acc-tc',
+      dueDate: inSevenDays,
+      frequency: RecurrenceFrequency.MONTHLY,
+      renewalRule: RenewalRule.AUTO_CREATE,
       notificationsEnabled: true,
       status: ObligationStatus.PENDING,
     },
@@ -342,10 +428,28 @@ export function loadLocalDatabase(): AppDatabaseState {
       return seed;
     }
     const parsed = JSON.parse(raw) as AppDatabaseState;
+    const savedCats = parsed.categories?.length ? [...parsed.categories] : [...INITIAL_CATEGORIES];
+    const existingIds = new Set(savedCats.map((c) => c.id));
+    for (const initCat of INITIAL_CATEGORIES) {
+      if (!existingIds.has(initCat.id)) {
+        savedCats.push(initCat);
+      }
+    }
+    const savedAccounts = (parsed.accounts || []).map((acc) => {
+      if (acc.type === AccountType.CREDIT && acc.creditLimit === undefined) {
+        return {
+          ...acc,
+          creditLimit: 2500,
+          billingDay: acc.billingDay ?? 18,
+          paymentDueDay: acc.paymentDueDay ?? 5,
+        };
+      }
+      return acc;
+    });
     return {
       preferences: { ...DEFAULT_PREFERENCES, ...(parsed.preferences || {}) },
-      categories: parsed.categories?.length ? parsed.categories : INITIAL_CATEGORIES,
-      accounts: parsed.accounts || [],
+      categories: savedCats,
+      accounts: savedAccounts,
       transactions: parsed.transactions || [],
       transfers: parsed.transfers || [],
       debts: parsed.debts || [],
@@ -398,6 +502,123 @@ export function calculateAccountBalance(
   }
 
   return Math.round(balance);
+}
+
+/**
+ * Calcula la fecha exacta de término (YYYY-MM-DD) de una compra en cuotas
+ * sumando los meses restantes a partir de la fecha base.
+ */
+export function calculateInstallmentEndDate(
+  startDateStr: string,
+  remainingMonths: number
+): string {
+  const d = new Date(`${startDateStr}T12:00:00`);
+  if (Number.isNaN(d.getTime())) {
+    const fallback = new Date();
+    fallback.setMonth(fallback.getMonth() + Math.max(0, remainingMonths));
+    return fallback.toISOString().split('T')[0];
+  }
+  d.setMonth(d.getMonth() + Math.max(0, remainingMonths));
+  return d.toISOString().split('T')[0];
+}
+
+export interface CreditCardUsageSummary {
+  account: Account;
+  creditLimit: number;
+  billedDebt: number; // Gasto ya cargado/facturado en la tarjeta pendiente de abono
+  currentMonthDirectSpent: number; // Gastos del mes actual en esta tarjeta
+  futureInstallmentsCommitted: number; // Saldo comprometido en cuotas futuras por vencer
+  totalUsedCredit: number; // Cupo total ocupado (facturado + cuotas futuras)
+  availableCredit: number; // Cupo disponible para gastar
+  usagePct: number; // % de cupo utilizado
+  activeInstallments: RecurringObligation[];
+  activeSubscriptions: RecurringObligation[];
+  monthlyInstallmentsLoad: number; // Suma mensual de cuotas activas
+  monthlySubscriptionsLoad: number; // Suma mensual de suscripciones en la tarjeta
+  totalMonthlyFixedCardLoad: number; // Carga fija mensual total en la tarjeta
+}
+
+/**
+ * Calcula en tiempo real el cupo total, lo gastado/facturado, el cupo comprometido en cuotas futuras,
+ * cuánto cupo queda disponible para gastar y las suscripciones automáticas asociadas a una Tarjeta de Crédito.
+ */
+export function calculateCreditCardMetrics(
+  account: Account,
+  transactions: Transaction[],
+  transfers: AccountTransfer[],
+  obligations: RecurringObligation[]
+): CreditCardUsageSummary {
+  const creditLimit = Math.max(0, Math.round(account.creditLimit || 0));
+  const netBalance = calculateAccountBalance(account, transactions, transfers);
+  // En una tarjeta de crédito, un saldo negativo representa deuda/gasto facturado pendiente de pago
+  const billedDebt = Math.max(0, Math.round(-netBalance));
+
+  const currentMonthPrefix = new Date().toISOString().slice(0, 7);
+  const currentMonthDirectSpent = Math.round(
+    transactions
+      .filter(
+        (t) =>
+          t.accountId === account.id &&
+          t.type === TransactionType.EXPENSE &&
+          t.date.startsWith(currentMonthPrefix)
+      )
+      .reduce((s, t) => s + t.amount, 0)
+  );
+
+  const activeInstallments = obligations.filter(
+    (o) =>
+      o.accountId === account.id &&
+      Boolean(o.isInstallmentPlan) &&
+      o.status !== ObligationStatus.PAID &&
+      (o.paidInstallments || 0) < (o.totalInstallments || 1)
+  );
+
+  const futureInstallmentsCommitted = Math.round(
+    activeInstallments.reduce((sum, obl) => {
+      const total = Math.max(1, obl.totalInstallments || 1);
+      const paid = Math.min(total, Math.max(0, obl.paidInstallments || 0));
+      const remainingMonths = Math.max(0, total - paid);
+      return sum + remainingMonths * obl.amount;
+    }, 0)
+  );
+
+  const totalUsedCredit = Math.round(billedDebt + futureInstallmentsCommitted);
+  const availableCredit =
+    creditLimit > 0 ? Math.max(0, creditLimit - totalUsedCredit) : 0;
+  const usagePct =
+    creditLimit > 0 ? Math.min(100, (totalUsedCredit / creditLimit) * 100) : 0;
+
+  const activeSubscriptions = obligations.filter(
+    (o) =>
+      o.accountId === account.id &&
+      Boolean(o.isSubscription) &&
+      o.status !== ObligationStatus.PAID
+  );
+
+  const monthlyInstallmentsLoad = Math.round(
+    activeInstallments.reduce((s, o) => s + o.amount, 0)
+  );
+  const monthlySubscriptionsLoad = Math.round(
+    activeSubscriptions.reduce((s, o) => s + o.amount, 0)
+  );
+  const totalMonthlyFixedCardLoad =
+    monthlyInstallmentsLoad + monthlySubscriptionsLoad;
+
+  return {
+    account,
+    creditLimit,
+    billedDebt,
+    currentMonthDirectSpent,
+    futureInstallmentsCommitted,
+    totalUsedCredit,
+    availableCredit,
+    usagePct,
+    activeInstallments,
+    activeSubscriptions,
+    monthlyInstallmentsLoad,
+    monthlySubscriptionsLoad,
+    totalMonthlyFixedCardLoad,
+  };
 }
 
 export function triggerHaptic(enabled: boolean, pattern: number | number[] = 15): void {

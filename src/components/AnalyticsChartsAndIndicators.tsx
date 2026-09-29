@@ -1,5 +1,11 @@
 import React from 'react';
-import { Category, Transaction, TransactionType } from '../domain/models';
+import {
+  Category,
+  ObligationStatus,
+  RecurringObligation,
+  Transaction,
+  TransactionType,
+} from '../domain/models';
 import { formatMoney, triggerHaptic } from '../data/localRepository';
 import {
   calculateStatisticalMetrics,
@@ -12,6 +18,8 @@ import {
   Activity,
   BarChart3,
   Calendar,
+  CalendarClock,
+  CheckCircle2,
   CheckSquare,
   Globe,
   RefreshCw,
@@ -24,6 +32,9 @@ interface AnalyticsChartsAndIndicatorsProps {
   categories: Category[];
   filteredExpenseTransactions: Transaction[];
   allTransactions: Transaction[];
+  obligations?: RecurringObligation[];
+  onOpenObligationPayment?: (obligation: RecurringObligation) => void;
+  onManageObligations?: () => void;
   selectedCategoryIds: Set<string>;
   onToggleCategoryId: (catId: string) => void;
   onSelectAllCategories: () => void;
@@ -58,6 +69,10 @@ export const AnalyticsChartsAndIndicators: React.FC<
 > = ({
   categories,
   filteredExpenseTransactions,
+  allTransactions,
+  obligations = [],
+  onOpenObligationPayment,
+  onManageObligations,
   selectedCategoryIds,
   onToggleCategoryId,
   onSelectAllCategories,
@@ -72,6 +87,7 @@ export const AnalyticsChartsAndIndicators: React.FC<
   currencySymbol,
   hapticEnabled,
 }) => {
+  const catMap = new Map(categories.map((c) => [c.id, c]));
   const expenseCategories = categories.filter(
     (c) => !c.isDeleted && c.type !== TransactionType.INCOME
   );
@@ -173,6 +189,84 @@ export const AnalyticsChartsAndIndicators: React.FC<
       maximumFractionDigits: 0,
     })}`;
   };
+
+  // Estadística de Recordatorios y Cuentas (Luz, Agua, Gastos Comunes y Pagos Fijos)
+  const obligationsStatRows = obligations.map((obl) => {
+    const cat = catMap.get(obl.categoryId);
+    // Movimientos vinculados explícitamente a este recordatorio
+    const linkedAll = allTransactions.filter(
+      (t) => t.linkedObligationId === obl.id && t.type === TransactionType.EXPENSE
+    );
+    const linkedInRange = filteredExpenseTransactions.filter(
+      (t) => t.linkedObligationId === obl.id
+    );
+
+    // Historial combinado (transacciones vinculadas o historial propio del recordatorio)
+    const historyAmounts =
+      linkedAll.length > 0
+        ? linkedAll.map((t) => t.amount)
+        : (obl.paymentHistory || []).map((p) => p.amountPaid);
+
+    const histMetrics = calculateStatisticalMetrics(historyAmounts);
+
+    const periodPaidTotal =
+      linkedInRange.length > 0
+        ? linkedInRange.reduce((s, t) => s + t.amount, 0)
+        : (obl.paymentHistory || [])
+            .filter((p) => p.date >= startDate && p.date <= endDate)
+            .reduce((s, p) => s + p.amountPaid, 0);
+
+    const periodCount =
+      linkedInRange.length > 0
+        ? linkedInRange.length
+        : (obl.paymentHistory || []).filter(
+            (p) => p.date >= startDate && p.date <= endDate
+          ).length;
+
+    const lastPaid =
+      obl.lastPaidAmount ??
+      (linkedAll.length > 0
+        ? [...linkedAll].sort((a, b) => b.date.localeCompare(a.date))[0].amount
+        : 0);
+
+    const effectivePaidForCompare =
+      periodPaidTotal > 0 ? periodPaidTotal : lastPaid;
+
+    const diffFromReference =
+      obl.amount > 0 && effectivePaidForCompare > 0
+        ? effectivePaidForCompare - obl.amount
+        : 0;
+
+    return {
+      obligation: obl,
+      category: cat,
+      isVariable: Boolean(obl.isVariableAmount),
+      referenceAmount: obl.amount,
+      lastPaid,
+      periodPaidTotal,
+      periodCount,
+      historicalMean: histMetrics.mean,
+      historicalStdDev: histMetrics.stdDev,
+      historicalCount: histMetrics.count,
+      diffFromReference,
+    };
+  });
+
+  const totalPaidInObligationsRange = obligationsStatRows.reduce(
+    (s, r) => s + r.periodPaidTotal,
+    0
+  );
+  const totalPaidVariableRange = obligationsStatRows
+    .filter((r) => r.isVariable)
+    .reduce((s, r) => s + r.periodPaidTotal, 0);
+  const totalDiffVsReference = obligationsStatRows.reduce(
+    (s, r) => s + r.diffFromReference,
+    0
+  );
+  const obligationsShareOfExpensePct =
+    selectedTotalExpense > 0
+      ? (totalPaidInObligationsRange / selectedTotalExpense) * 100
+      : 0;
 
   return (
     <div className="space-y-5">
@@ -739,6 +833,270 @@ export const AnalyticsChartsAndIndicators: React.FC<
             );
           })}
         </div>
+      </div>
+
+      {/* 5. ESTADÍSTICA DE RECORDATORIOS Y CUENTAS (LUZ, AGUA, GASTOS COMUNES Y PAGOS FIJOS) */}
+      <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-4 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2">
+              <CalendarClock className="w-4 h-4 text-emerald-600" />
+              <h3 className="text-sm font-bold text-stone-900 dark:text-zinc-100">
+                Estadística de Recordatorios y Cuentas Variables / Fijas ({startDate} al {endDate})
+              </h3>
+            </div>
+            <p className="text-xs text-stone-500 dark:text-zinc-400">
+              Evalúa cuánto pagaste realmente en cuentas como Luz, Agua, Gastos Comunes o Arriendo frente a su monto estimado y su promedio histórico
+            </p>
+          </div>
+
+          {onManageObligations && (
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic(hapticEnabled, 12);
+                onManageObligations();
+              }}
+              className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
+            >
+              <CalendarClock className="w-3.5 h-3.5" />
+              Gestionar / Agregar Cuentas
+            </button>
+          )}
+        </div>
+
+        {/* KPIs de Cuentas y Recordatorios */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="min-w-0 overflow-hidden p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60 border border-stone-200/60 dark:border-zinc-800">
+            <span className="text-[10px] font-bold uppercase text-stone-400 block truncate">
+              Pagado en Cuentas (Rango)
+            </span>
+            <p className="text-sm font-extrabold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-1 break-all">
+              {formatMoney(totalPaidInObligationsRange, currencySymbol)}
+            </p>
+            <span className="text-[10px] text-stone-400 font-mono">
+              {obligationsShareOfExpensePct.toFixed(1)}% del gasto del período
+            </span>
+          </div>
+
+          <div className="min-w-0 overflow-hidden p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60 border border-stone-200/60 dark:border-zinc-800">
+            <span className="text-[10px] font-bold uppercase text-stone-400 block truncate">
+              Cuentas Monto Variable
+            </span>
+            <p className="text-sm font-extrabold font-mono tabular-nums text-amber-700 dark:text-amber-400 mt-1 break-all">
+              {formatMoney(totalPaidVariableRange, currencySymbol)}
+            </p>
+            <span className="text-[10px] text-stone-400">
+              {obligationsStatRows.filter((r) => r.isVariable).length} cuentas variables (Luz, Agua, GGCC...)
+            </span>
+          </div>
+
+          <div className="min-w-0 overflow-hidden p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60 border border-stone-200/60 dark:border-zinc-800">
+            <span className="text-[10px] font-bold uppercase text-stone-400 block truncate">
+              Diferencia Real vs. Referencial
+            </span>
+            <p
+              className={`text-sm font-extrabold font-mono tabular-nums mt-1 break-all ${
+                totalDiffVsReference > 0
+                  ? 'text-rose-600 dark:text-rose-400'
+                  : totalDiffVsReference < 0
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-stone-900 dark:text-zinc-100'
+              }`}
+            >
+              {totalDiffVsReference > 0 ? '+' : ''}
+              {formatMoney(totalDiffVsReference, currencySymbol)}
+            </p>
+            <span className="text-[10px] text-stone-400">
+              {totalDiffVsReference > 0
+                ? 'Pagaste más de lo estimado'
+                : totalDiffVsReference < 0
+                ? 'Ahorro frente a lo estimado'
+                : 'Igual a lo referencial'}
+            </span>
+          </div>
+
+          <div className="min-w-0 overflow-hidden p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60 border border-stone-200/60 dark:border-zinc-800">
+            <span className="text-[10px] font-bold uppercase text-stone-400 block truncate">
+              Total Recordatorios Activos
+            </span>
+            <p className="text-sm font-extrabold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-1">
+              {obligationsStatRows.length} cuentas
+            </p>
+            <span className="text-[10px] text-stone-400">
+              {
+                obligationsStatRows.filter(
+                  (r) => r.obligation.status !== ObligationStatus.PAID && r.periodPaidTotal === 0
+                ).length
+              }{' '}
+              pendientes de pago
+            </span>
+          </div>
+        </div>
+
+        {/* Desglose por cada Recordatorio / Cuenta (Luz, Agua, Gastos Comunes, Arriendo, etc.) */}
+        {obligationsStatRows.length === 0 ? (
+          <div className="p-4 rounded-xl bg-stone-50 dark:bg-zinc-800/40 text-center text-xs text-stone-500">
+            Aún no tienes recordatorios de cuentas configurados. Usa el botón superior para agregar cuentas de Luz, Agua, Gastos Comunes o Arriendo.
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {obligationsStatRows.map((row) => {
+              const {
+                obligation,
+                category,
+                isVariable,
+                referenceAmount,
+                lastPaid,
+                periodPaidTotal,
+                historicalMean,
+                historicalStdDev,
+                diffFromReference,
+              } = row;
+
+              const displayedPaid =
+                periodPaidTotal > 0 ? periodPaidTotal : lastPaid;
+              const maxCompare = Math.max(
+                1,
+                referenceAmount,
+                displayedPaid,
+                historicalMean
+              );
+              const refBarPct =
+                referenceAmount > 0
+                  ? Math.min(100, (referenceAmount / maxCompare) * 100)
+                  : 4;
+              const paidBarPct =
+                displayedPaid > 0
+                  ? Math.min(100, (displayedPaid / maxCompare) * 100)
+                  : 4;
+
+              return (
+                <div
+                  key={obligation.id}
+                  className="p-3.5 rounded-xl bg-stone-50/70 dark:bg-zinc-800/40 border border-stone-200/70 dark:border-zinc-800 space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span
+                        className="w-8 h-8 rounded-xl flex items-center justify-center text-white shrink-0"
+                        style={{ backgroundColor: category?.color || '#047857' }}
+                      >
+                        <CategoryIcon
+                          iconName={category?.icon || 'Zap'}
+                          className="w-4 h-4"
+                        />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-xs font-bold text-stone-900 dark:text-zinc-100 truncate">
+                            {obligation.name}
+                          </span>
+                          <span className="text-[10px] font-semibold text-stone-500 dark:text-zinc-400">
+                            · {isVariable ? 'Monto Variable (Cuenta)' : 'Monto Fijo'} · Vence{' '}
+                            {obligation.dueDate}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-stone-500 dark:text-zinc-400 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                          <span>
+                            Referencial:{' '}
+                            <strong>
+                              {referenceAmount > 0
+                                ? formatMoney(referenceAmount, currencySymbol)
+                                : 'Variable'}
+                            </strong>
+                          </span>
+                          <span>
+                            Pagado en rango:{' '}
+                            <strong className="text-stone-900 dark:text-zinc-100">
+                              {formatMoney(periodPaidTotal, currencySymbol)}
+                            </strong>
+                          </span>
+                          <span>
+                            Último pago:{' '}
+                            <strong>
+                              {lastPaid > 0
+                                ? formatMoney(lastPaid, currencySymbol)
+                                : 'Pendiente'}
+                            </strong>
+                          </span>
+                          <span>
+                            Prom (μ):{' '}
+                            <strong>
+                              {formatMoney(historicalMean, currencySymbol)}
+                            </strong>
+                          </span>
+                          <span>
+                            Desv (σ):{' '}
+                            <strong>
+                              {formatMoney(historicalStdDev, currencySymbol)}
+                            </strong>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {referenceAmount > 0 && displayedPaid > 0 && (
+                        <span
+                          className={`text-xs font-mono font-bold ${
+                            diffFromReference > 0
+                              ? 'text-rose-600 dark:text-rose-400'
+                              : diffFromReference < 0
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-stone-500'
+                          }`}
+                        >
+                          {diffFromReference > 0 ? '+' : ''}
+                          {formatMoney(diffFromReference, currencySymbol)}
+                        </span>
+                      )}
+
+                      {onOpenObligationPayment && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic(hapticEnabled, 15);
+                            onOpenObligationPayment(obligation);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold flex items-center gap-1"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Ingresar Monto Pagado
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Barras comparativas: Referencial vs Monto Real Pagado */}
+                  <div className="space-y-1 pt-1">
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-stone-500">
+                      <span className="w-20 shrink-0">Referencial:</span>
+                      <div className="flex-1 h-1.5 bg-stone-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-stone-400 dark:bg-zinc-500 rounded-full"
+                          style={{ width: `${refBarPct}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-stone-700 dark:text-zinc-300">
+                      <span className="w-20 shrink-0 font-bold">Real Pagado:</span>
+                      <div className="flex-1 h-2 bg-stone-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${paidBarPct}%`,
+                            backgroundColor: category?.color || '#059669',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

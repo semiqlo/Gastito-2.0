@@ -63,6 +63,9 @@ export interface Account {
   name: string;
   type: AccountType;
   initialBalance: number;
+  creditLimit?: number; // Cupo total autorizado para tarjetas de crédito
+  billingDay?: number; // Día de corte / facturación mensual (1-31)
+  paymentDueDay?: number; // Día de pago mensual (1-31)
   additionalInfo: string;
   isArchived: boolean;
   createdAt: string;
@@ -77,6 +80,11 @@ export interface Transaction {
   date: string; // YYYY-MM-DD
   description: string;
   linkedObligationId?: string;
+  installmentInfo?: {
+    current: number;
+    total: number;
+    totalPurchaseAmount: number;
+  };
   createdAt: string;
 }
 
@@ -131,11 +139,29 @@ export interface Budget {
   }[];
 }
 
+export interface ObligationPaymentRecord {
+  id: string;
+  date: string; // YYYY-MM-DD
+  amountPaid: number;
+  estimatedAmount: number;
+  accountId: string;
+  transactionId: string;
+  notes?: string;
+}
+
 export interface RecurringObligation {
   id: string;
   name: string;
   categoryId: string;
-  amount: number;
+  amount: number; // Monto fijo, cuota mensual o monto estimado/referencial
+  isVariableAmount?: boolean; // true para cuentas como Luz, Agua, Gastos Comunes cuyo monto varía mes a mes
+  isInstallmentPlan?: boolean; // true cuando es una compra en cuotas con tarjeta de crédito con meses definidos
+  totalInstallments?: number; // Cantidad total de cuotas/meses (ej. 3, 6, 12, 24)
+  paidInstallments?: number; // Cuotas ya pagadas/cargadas (ej. 1 de 6)
+  installmentTotalAmount?: number; // Monto total original de la compra en cuotas
+  endDate?: string; // Fecha de término automática (YYYY-MM-DD) al cumplir las cuotas
+  isSubscription?: boolean; // true para suscripciones (Spotify, Netflix, Gimnasio, iCloud, etc.)
+  autoChargeCard?: boolean; // true si se carga automáticamente a la tarjeta/cuenta en su fecha de cobro
   accountId: string;
   dueDate: string; // YYYY-MM-DD
   frequency: RecurrenceFrequency;
@@ -144,6 +170,8 @@ export interface RecurringObligation {
   status: ObligationStatus;
   lastPaidTransactionId?: string;
   lastPaidDate?: string;
+  lastPaidAmount?: number;
+  paymentHistory?: ObligationPaymentRecord[];
 }
 
 export interface UserPreferences {

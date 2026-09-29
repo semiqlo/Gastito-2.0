@@ -10,6 +10,7 @@ import {
   TransactionType,
 } from '../domain/models';
 import {
+  calculateInstallmentEndDate,
   formatMoney,
   triggerHaptic,
 } from '../data/localRepository';
@@ -138,13 +139,19 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
   const [bgtPeriod, setBgtPeriod] = useState<BudgetPeriod>(BudgetPeriod.MONTHLY);
   const [bgtStartDate, setBgtStartDate] = useState(() => new Date().toISOString().split('T')[0]);
 
-  // Modal Pago Recurrente (Obligación)
+  // Modal Pago Recurrente / Recordatorio de Cuenta (Fijo, Variable, Cuotas TC o Suscripción TC)
   const [showObligationModal, setShowObligationModal] = useState(false);
+  const [editingObligationId, setEditingObligationId] = useState<string | undefined>(undefined);
+  const [oblKind, setOblKind] = useState<'VARIABLE' | 'FIXED' | 'INSTALLMENTS' | 'SUBSCRIPTION'>('VARIABLE');
   const [oblName, setOblName] = useState('');
   const [oblCategoryId, setOblCategoryId] = useState(
     categories.find((c) => !c.isDeleted && c.type !== TransactionType.INCOME)?.id || ''
   );
+  const [oblIsVariable, setOblIsVariable] = useState<boolean>(true);
   const [oblAmount, setOblAmount] = useState('');
+  const [oblTotalInstallments, setOblTotalInstallments] = useState('6');
+  const [oblPaidInstallments, setOblPaidInstallments] = useState('0');
+  const [oblAutoCharge, setOblAutoCharge] = useState(true);
   const [oblAccountId, setOblAccountId] = useState(accounts[0]?.id || '');
   const [oblDueDate, setOblDueDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [oblFrequency, setOblFrequency] = useState<RecurrenceFrequency>(RecurrenceFrequency.MONTHLY);
@@ -367,26 +374,109 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
     setShowBudgetModal(false);
   };
 
+  const handleOpenNewObligationModal = () => {
+    setEditingObligationId(undefined);
+    setOblKind('VARIABLE');
+    setOblName('');
+    setOblIsVariable(true);
+    setOblAmount('');
+    setOblTotalInstallments('6');
+    setOblPaidInstallments('0');
+    setOblAutoCharge(true);
+    setOblCategoryId(
+      categories.find((c) => !c.isDeleted && c.type !== TransactionType.INCOME)?.id || ''
+    );
+    setOblAccountId(accounts[0]?.id || '');
+    setOblDueDate(new Date().toISOString().split('T')[0]);
+    setOblFrequency(RecurrenceFrequency.MONTHLY);
+    setOblRenewalRule(RenewalRule.ONLY_IF_PREVIOUS_PAID);
+    setOblNotify(true);
+    setShowObligationModal(true);
+  };
+
+  const handleOpenEditObligationModal = (obl: RecurringObligation) => {
+    setEditingObligationId(obl.id);
+    if (obl.isInstallmentPlan) {
+      setOblKind('INSTALLMENTS');
+      setOblIsVariable(false);
+    } else if (obl.isSubscription) {
+      setOblKind('SUBSCRIPTION');
+      setOblIsVariable(false);
+    } else if (obl.isVariableAmount) {
+      setOblKind('VARIABLE');
+      setOblIsVariable(true);
+    } else {
+      setOblKind('FIXED');
+      setOblIsVariable(false);
+    }
+    setOblName(obl.name);
+    setOblAmount(obl.amount > 0 ? String(Math.round(obl.amount)) : '');
+    setOblTotalInstallments(String(obl.totalInstallments || 6));
+    setOblPaidInstallments(String(obl.paidInstallments || 0));
+    setOblAutoCharge(Boolean(obl.autoChargeCard ?? true));
+    setOblCategoryId(obl.categoryId);
+    setOblAccountId(obl.accountId);
+    setOblDueDate(obl.dueDate);
+    setOblFrequency(obl.frequency);
+    setOblRenewalRule(obl.renewalRule);
+    setOblNotify(obl.notificationsEnabled);
+    setShowObligationModal(true);
+  };
+
   const handleCreateObligationSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const num = parseFloat(oblAmount);
-    if (!oblName.trim() || Number.isNaN(num) || num <= 0 || !oblCategoryId || !oblAccountId)
+    const isVar = oblKind === 'VARIABLE';
+    const isInst = oblKind === 'INSTALLMENTS';
+    const isSub = oblKind === 'SUBSCRIPTION';
+    const parsedNum = oblAmount.trim() === '' ? 0 : Math.round(parseFloat(oblAmount));
+    if (!oblName.trim() || Number.isNaN(parsedNum) || parsedNum < 0 || !oblCategoryId || !oblAccountId)
       return;
+    if (!isVar && parsedNum <= 0) return;
+
+    const existing = editingObligationId
+      ? obligations.find((o) => o.id === editingObligationId)
+      : undefined;
+
+    const totalInst = isInst ? Math.max(2, parseInt(oblTotalInstallments, 10) || 6) : undefined;
+    const paidInst = isInst
+      ? Math.min(totalInst! - 1, Math.max(0, parseInt(oblPaidInstallments, 10) || 0))
+      : undefined;
+    const remainingInst = isInst && totalInst ? Math.max(1, totalInst - (paidInst || 0)) : 1;
+    const computedEndDate = isInst
+      ? calculateInstallmentEndDate(oblDueDate, remainingInst)
+      : undefined;
 
     triggerHaptic(hapticEnabled, [15, 30]);
-    onSaveObligation({
-      name: oblName.trim(),
-      categoryId: oblCategoryId,
-      amount: num,
-      accountId: oblAccountId,
-      dueDate: oblDueDate,
-      frequency: oblFrequency,
-      renewalRule: oblRenewalRule,
-      notificationsEnabled: oblNotify,
-      status: ObligationStatus.PENDING,
-    });
+    onSaveObligation(
+      {
+        name: oblName.trim(),
+        categoryId: oblCategoryId,
+        amount: parsedNum,
+        isVariableAmount: isVar,
+        accountId: oblAccountId,
+        dueDate: oblDueDate,
+        endDate: computedEndDate,
+        frequency: oblFrequency,
+        renewalRule:
+          isInst || isSub ? RenewalRule.AUTO_CREATE : oblRenewalRule,
+        notificationsEnabled: oblNotify,
+        status: existing ? existing.status : ObligationStatus.PENDING,
+        isInstallmentPlan: isInst,
+        totalInstallments: totalInst,
+        paidInstallments: paidInst,
+        installmentTotalAmount: isInst && totalInst ? parsedNum * totalInst : undefined,
+        isSubscription: isSub,
+        autoChargeCard: isInst || isSub ? oblAutoCharge : false,
+        lastPaidTransactionId: existing?.lastPaidTransactionId,
+        lastPaidDate: existing?.lastPaidDate,
+        lastPaidAmount: existing?.lastPaidAmount,
+        paymentHistory: existing?.paymentHistory,
+      },
+      editingObligationId
+    );
     setOblName('');
     setOblAmount('');
+    setEditingObligationId(undefined);
     setShowObligationModal(false);
   };
 
@@ -453,7 +543,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
           }`}
         >
           <CalendarClock className="w-3.5 h-3.5 text-indigo-600" />
-          Pagos Fijos ({obligations.length})
+          Recordatorios ({obligations.length})
         </button>
 
         <button
@@ -596,11 +686,14 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
             </div>
           </div>
 
-          {/* Indicadores mindicador.cl + Controles Económicos + Gráfico de Líneas + Gráfico de Barras con Checkboxes */}
+          {/* Indicadores mindicador.cl + Controles Económicos + Gráfico de Líneas + Gráfico de Barras con Checkboxes + Estadística de Cuentas */}
           <AnalyticsChartsAndIndicators
             categories={categories}
             filteredExpenseTransactions={filteredExpenseTransactions}
             allTransactions={transactions}
+            obligations={obligations}
+            onOpenObligationPayment={onPayObligation}
+            onManageObligations={() => setActiveSubSection('RECURRING')}
             selectedCategoryIds={selectedCategoryIds}
             onToggleCategoryId={handleToggleCategoryStat}
             onSelectAllCategories={handleSelectAllCategories}
@@ -861,25 +954,25 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         </div>
       )}
 
-      {/* SECCIÓN 3: PAGOS FIJOS / RECURRENTES */}
+      {/* SECCIÓN 3: RECORDATORIOS DE GASTOS, CUENTAS DE MONTO VARIABLE Y PAGOS FIJOS */}
       {activeSubSection === 'RECURRING' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-bold text-stone-900 dark:text-zinc-100">
-                Pagos Fijos y Obligaciones Recurrentes
+                Recordatorios de Gastos, Cuentas Variables y Pagos Fijos
               </h3>
               <p className="text-xs text-stone-500 dark:text-zinc-400">
-                Funcionan como obligaciones pendientes hasta que confirmas su pago efectivo
+                Registra cuentas cuyo monto varía mes a mes (Luz, Agua, Gastos Comunes, Gas) o pagos fijos. Al pagar ingresas el monto exacto y se suma a tus Estadísticas.
               </p>
             </div>
             <button
               type="button"
-              onClick={() => setShowObligationModal(true)}
+              onClick={handleOpenNewObligationModal}
               className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
             >
               <Plus className="w-4 h-4" />
-              Nueva Obligación
+              Nuevo Recordatorio / Cuenta
             </button>
           </div>
 
@@ -888,6 +981,21 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
               const cat = catMap.get(obl.categoryId);
               const acc = accMap.get(obl.accountId);
               const isPaid = obl.status === ObligationStatus.PAID;
+              const isVariable = Boolean(obl.isVariableAmount);
+
+              const linkedTxs = transactions.filter(
+                (t) => t.linkedObligationId === obl.id && t.type === TransactionType.EXPENSE
+              );
+              const historyAmounts =
+                linkedTxs.length > 0
+                  ? linkedTxs.map((t) => t.amount)
+                  : (obl.paymentHistory || []).map((p) => p.amountPaid);
+              const oblStats = calculateStatisticalMetrics(historyAmounts);
+              const lastPaidVal =
+                obl.lastPaidAmount ??
+                (linkedTxs.length > 0
+                  ? [...linkedTxs].sort((a, b) => b.date.localeCompare(a.date))[0].amount
+                  : 0);
 
               return (
                 <div
@@ -901,11 +1009,24 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                     >
                       <CategoryIcon iconName={cat?.icon || 'Zap'} className="w-5 h-5" />
                     </div>
-                    <div>
+                    <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <h4 className="text-sm font-bold text-stone-900 dark:text-zinc-100">
                           {obl.name}
                         </h4>
+                        {obl.isInstallmentPlan ? (
+                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-violet-100 text-violet-800 dark:bg-violet-950/70 dark:text-violet-300">
+                            En Cuotas ({obl.paidInstallments || 0}/{obl.totalInstallments || 1} meses · Termina: {obl.endDate || '---'})
+                          </span>
+                        ) : obl.isSubscription ? (
+                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 dark:bg-indigo-950/70 dark:text-indigo-300">
+                            Suscripción Automática TC
+                          </span>
+                        ) : (
+                          <span className="text-[11px] font-semibold text-stone-500 dark:text-zinc-400">
+                            · {isVariable ? 'Monto Variable (Cuenta)' : 'Monto Fijo'}
+                          </span>
+                        )}
                         <span
                           className={`text-[11px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1 ${
                             isPaid
@@ -916,48 +1037,97 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                           {isPaid ? (
                             <>
                               <CheckCircle2 className="w-3 h-3" />
-                              Gasto Efectivamente Pagado
+                              {obl.isInstallmentPlan ? 'Cuotas Finalizadas' : 'Pagado en este ciclo'}
                             </>
                           ) : (
                             <>
                               <Clock className="w-3 h-3" />
-                              Obligación Pendiente
+                              {obl.isInstallmentPlan
+                                ? `Restan ${Math.max(0, (obl.totalInstallments || 1) - (obl.paidInstallments || 0))} cuotas`
+                                : obl.autoChargeCard
+                                ? 'Cargo Automático Activo'
+                                : 'Recordatorio Pendiente'}
                             </>
                           )}
                         </span>
                       </div>
-                      <p className="text-xs text-stone-500 dark:text-zinc-400 mt-0.5">
-                        Vence: <strong className="font-mono">{obl.dueDate}</strong> · Cuenta:{' '}
-                        {acc?.name || 'Principal'}
+
+                      <p className="text-xs text-stone-500 dark:text-zinc-400">
+                        Próximo vencimiento: <strong className="font-mono">{obl.dueDate}</strong> · Cuenta:{' '}
+                        {acc?.name || 'Principal'} · {renewalLabelMap[obl.renewalRule]}
                       </p>
-                      <p className="text-[11px] text-stone-400 dark:text-zinc-500 mt-0.5">
-                        Regla de renovación: {renewalLabelMap[obl.renewalRule]}
-                      </p>
+
+                      {/* Información estadística de pagos de esta cuenta */}
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono text-stone-500 dark:text-zinc-400">
+                        <span>
+                          Referencial:{' '}
+                          <strong className="text-stone-800 dark:text-zinc-200">
+                            {obl.amount > 0
+                              ? formatMoney(obl.amount, currencySymbol)
+                              : 'Se ingresa al pagar'}
+                          </strong>
+                        </span>
+                        {lastPaidVal > 0 && (
+                          <span>
+                            Último pagado:{' '}
+                            <strong className="text-emerald-700 dark:text-emerald-400">
+                              {formatMoney(lastPaidVal, currencySymbol)}
+                            </strong>
+                            {obl.lastPaidDate ? ` (${obl.lastPaidDate})` : ''}
+                          </span>
+                        )}
+                        {oblStats.count > 0 && (
+                          <span>
+                            Promedio (μ):{' '}
+                            <strong className="text-stone-800 dark:text-zinc-200">
+                              {formatMoney(oblStats.mean, currencySymbol)}
+                            </strong>{' '}
+                            (σ: {formatMoney(oblStats.stdDev, currencySymbol)})
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-stone-100 dark:border-zinc-800">
-                    <span className="text-base font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100">
-                      {formatMoney(obl.amount, currencySymbol)}
-                    </span>
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 pt-2 sm:pt-0 border-t sm:border-t-0 border-stone-100 dark:border-zinc-800">
+                    <div className="text-left sm:text-right mr-1">
+                      <span className="text-[10px] uppercase font-bold text-stone-400 block">
+                        {isVariable ? 'Estimado / Último' : 'Monto Fijo'}
+                      </span>
+                      <span className="text-base font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100">
+                        {obl.amount > 0
+                          ? formatMoney(obl.amount, currencySymbol)
+                          : lastPaidVal > 0
+                          ? formatMoney(lastPaidVal, currencySymbol)
+                          : 'Variable'}
+                      </span>
+                    </div>
 
-                    {!isPaid && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          triggerHaptic(hapticEnabled, [20, 40]);
-                          onPayObligation(obl);
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold"
-                      >
-                        Registrar Pago
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic(hapticEnabled, [20, 40]);
+                        onPayObligation(obl);
+                      }}
+                      className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      {isVariable ? 'Ingresar Monto Pagado' : 'Registrar Pago'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditObligationModal(obl)}
+                      className="px-2.5 py-2 rounded-xl bg-stone-100 dark:bg-zinc-800 hover:bg-stone-200 dark:hover:bg-zinc-700 text-stone-700 dark:text-zinc-300 text-xs font-semibold"
+                    >
+                      Editar
+                    </button>
 
                     <button
                       type="button"
                       onClick={() => onDeleteObligation(obl.id)}
                       className="p-1.5 rounded-lg text-stone-400 hover:text-rose-600"
+                      aria-label="Eliminar recordatorio"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1137,13 +1307,15 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         </div>
       )}
 
-      {/* MODAL NUEVA OBLIGACIÓN RECURRENTE */}
+      {/* MODAL NUEVO / EDITAR RECORDATORIO DE GASTO O CUENTA (VARIABLE O FIJA) */}
       {showObligationModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-3xl max-w-md w-full p-5 space-y-4 shadow-xl">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-3xl max-w-md w-full p-5 space-y-4 shadow-xl my-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-stone-900 dark:text-zinc-100">
-                Nuevo Pago Fijo / Obligación
+                {editingObligationId
+                  ? 'Editar Recordatorio / Cuenta'
+                  : 'Nuevo Recordatorio de Gasto o Cuenta'}
               </h3>
               <button
                 type="button"
@@ -1154,15 +1326,193 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
               </button>
             </div>
 
+            {/* Plantillas rápidas para cuentas comunes, cuotas y suscripciones */}
+            {!editingObligationId && (
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-semibold text-stone-500 dark:text-zinc-400 block">
+                  Plantillas rápidas (Cuentas variables, Suscripciones TC y Gastos Fijos):
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { label: '⚡ Cuenta de Luz', name: 'Cuenta de Luz Eléctrica', catId: 'cat-luz', kind: 'VARIABLE' as const },
+                    { label: '💧 Cuenta de Agua', name: 'Cuenta de Agua Potable', catId: 'cat-agua', kind: 'VARIABLE' as const },
+                    { label: '🏢 Gastos Comunes', name: 'Gastos Comunes', catId: 'cat-gastos-comunes', kind: 'VARIABLE' as const },
+                    { label: '🔥 Cuenta de Gas', name: 'Cuenta de Gas', catId: 'cat-gas', kind: 'VARIABLE' as const },
+                    { label: '🎬 Netflix (TC)', name: 'Suscripción Netflix', catId: 'cat-suscripciones', kind: 'SUBSCRIPTION' as const },
+                    { label: '🎵 Spotify (TC)', name: 'Suscripción Spotify', catId: 'cat-suscripciones', kind: 'SUBSCRIPTION' as const },
+                    { label: '💳 Compra en Cuotas TC', name: 'Compra en Cuotas', catId: 'cat-cuotas-tc', kind: 'INSTALLMENTS' as const },
+                    { label: '🔑 Arriendo', name: 'Arriendo Mensual', catId: 'cat-arriendo', kind: 'FIXED' as const },
+                  ].map((tpl) => (
+                    <button
+                      key={tpl.label}
+                      type="button"
+                      onClick={() => {
+                        setOblName(tpl.name);
+                        setOblKind(tpl.kind);
+                        setOblIsVariable(tpl.kind === 'VARIABLE');
+                        const foundCat = categories.find((c) => c.id === tpl.catId && !c.isDeleted);
+                        if (foundCat) setOblCategoryId(foundCat.id);
+                        if (tpl.kind === 'SUBSCRIPTION' || tpl.kind === 'INSTALLMENTS') {
+                          const tcAcc = accounts.find((a) => a.type === 'CREDIT');
+                          if (tcAcc) setOblAccountId(tcAcc.id);
+                        }
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-stone-100 dark:bg-zinc-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-[11px] font-semibold text-stone-700 dark:text-zinc-300 border border-stone-200/70 dark:border-zinc-700"
+                    >
+                      {tpl.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <form onSubmit={handleCreateObligationSubmit} className="space-y-3">
+              {/* Selector de Modalidad (Variable, Fijo, En Cuotas con término, Suscripción TC) */}
               <div>
                 <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
-                  Nombre de la Obligación
+                  Modalidad del Gasto / Recordatorio
+                </label>
+                <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-stone-100 dark:bg-zinc-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOblKind('VARIABLE');
+                      setOblIsVariable(true);
+                    }}
+                    className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all ${
+                      oblKind === 'VARIABLE'
+                        ? 'bg-white dark:bg-zinc-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
+                        : 'text-stone-600 dark:text-zinc-400'
+                    }`}
+                  >
+                    Cuenta Variable (Luz, Agua...)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOblKind('FIXED');
+                      setOblIsVariable(false);
+                    }}
+                    className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all ${
+                      oblKind === 'FIXED'
+                        ? 'bg-white dark:bg-zinc-900 text-stone-900 dark:text-zinc-100 shadow-xs'
+                        : 'text-stone-600 dark:text-zinc-400'
+                    }`}
+                  >
+                    Pago Fijo Mensual
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOblKind('INSTALLMENTS');
+                      setOblIsVariable(false);
+                      const tc = accounts.find((a) => a.type === 'CREDIT');
+                      if (tc) setOblAccountId(tc.id);
+                    }}
+                    className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all ${
+                      oblKind === 'INSTALLMENTS'
+                        ? 'bg-violet-600 text-white shadow-xs'
+                        : 'text-stone-600 dark:text-zinc-400'
+                    }`}
+                  >
+                    Compra en Cuotas TC (con término)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOblKind('SUBSCRIPTION');
+                      setOblIsVariable(false);
+                      const tc = accounts.find((a) => a.type === 'CREDIT');
+                      if (tc) setOblAccountId(tc.id);
+                    }}
+                    className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all ${
+                      oblKind === 'SUBSCRIPTION'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-stone-600 dark:text-zinc-400'
+                    }`}
+                  >
+                    Suscripción Automática TC
+                  </button>
+                </div>
+                <p className="text-[11px] text-stone-500 dark:text-zinc-400 mt-1">
+                  {oblKind === 'VARIABLE'
+                    ? 'El recordatorio es fijo cada período, pero tú ingresas cuánto pagaste realmente en esa cuenta.'
+                    : oblKind === 'INSTALLMENTS'
+                    ? 'Gasto fijo mensual con cantidad de cuotas y fecha de término automática al completar los meses.'
+                    : oblKind === 'SUBSCRIPTION'
+                    ? 'Suscripción con cargo automático a tu tarjeta de crédito en la fecha indicada.'
+                    : 'Pago fijo recurrente cuyo monto se mantiene constante cada ciclo.'}
+                </p>
+              </div>
+
+              {oblKind === 'INSTALLMENTS' && (
+                <div className="p-3 rounded-xl bg-violet-50/70 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-800/70 space-y-2.5">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-bold text-violet-900 dark:text-violet-300 mb-1">
+                        Total de Cuotas (Meses)
+                      </label>
+                      <input
+                        type="number"
+                        min="2"
+                        max="72"
+                        value={oblTotalInstallments}
+                        onChange={(e) => setOblTotalInstallments(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-violet-300 dark:border-violet-700 text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-violet-900 dark:text-violet-300 mb-1">
+                        Cuotas ya pagadas
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="71"
+                        value={oblPaidInstallments}
+                        onChange={(e) => setOblPaidInstallments(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-violet-300 dark:border-violet-700 text-xs font-mono font-bold"
+                      />
+                    </div>
+                  </div>
+                  <div className="text-[11px] font-mono text-violet-800 dark:text-violet-300 flex items-center justify-between">
+                    <span>Fecha de término automática:</span>
+                    <strong>
+                      {calculateInstallmentEndDate(
+                        oblDueDate,
+                        Math.max(
+                          1,
+                          (parseInt(oblTotalInstallments, 10) || 6) -
+                            (parseInt(oblPaidInstallments, 10) || 0)
+                        )
+                      )}
+                    </strong>
+                  </div>
+                </div>
+              )}
+
+              {(oblKind === 'INSTALLMENTS' || oblKind === 'SUBSCRIPTION') && (
+                <label className="flex items-center gap-2 text-xs font-semibold text-stone-700 dark:text-zinc-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={oblAutoCharge}
+                    onChange={(e) => setOblAutoCharge(e.target.checked)}
+                    className="rounded border-stone-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>
+                    Generar cargo fijo automáticamente en la tarjeta al llegar la fecha de cobro
+                  </span>
+                </label>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
+                  Nombre de la Cuenta o Recordatorio
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="Ej. Arriendo, Colegiatura, Luz..."
+                  placeholder="Ej. Luz, Agua, Gastos Comunes, Arriendo..."
                   value={oblName}
                   onChange={(e) => setOblName(e.target.value)}
                   className="w-full px-3.5 py-2 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-sm"
@@ -1172,13 +1522,16 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
-                    Monto ({currencySymbol})
+                    {oblIsVariable
+                      ? `Monto Estimado Opcional (${currencySymbol})`
+                      : `Monto Fijo (${currencySymbol})`}
                   </label>
                   <input
                     type="number"
                     step="1"
-                    required
-                    placeholder="0"
+                    min="0"
+                    required={!oblIsVariable}
+                    placeholder={oblIsVariable ? 'Opcional (ej. 35000 o 0)' : 'Ej. 450000'}
                     value={oblAmount}
                     onChange={(e) => setOblAmount(e.target.value)}
                     className="w-full px-3.5 py-2 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-sm font-mono"
@@ -1186,7 +1539,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
-                    Fecha Límite
+                    Fecha de Vencimiento
                   </label>
                   <input
                     type="date"
@@ -1200,7 +1553,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
-                    Categoría
+                    Categoría para la Estadística
                   </label>
                   <select
                     value={oblCategoryId}
@@ -1234,28 +1587,45 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
-                  Regla de Renovación al Vencer
-                </label>
-                <select
-                  value={oblRenewalRule}
-                  onChange={(e) => setOblRenewalRule(e.target.value as RenewalRule)}
-                  className="w-full px-3.5 py-2 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-xs"
-                >
-                  <option value={RenewalRule.ONLY_IF_PREVIOUS_PAID}>
-                    Solo renovar si el anterior fue marcado como pagado
-                  </option>
-                  <option value={RenewalRule.ASK_BEFORE}>Preguntar antes de renovar</option>
-                  <option value={RenewalRule.AUTO_CREATE}>Crear automáticamente</option>
-                </select>
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
+                    Periodicidad
+                  </label>
+                  <select
+                    value={oblFrequency}
+                    onChange={(e) => setOblFrequency(e.target.value as RecurrenceFrequency)}
+                    className="w-full px-3 py-2 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-xs"
+                  >
+                    <option value={RecurrenceFrequency.MONTHLY}>Mensual</option>
+                    <option value={RecurrenceFrequency.BIWEEKLY}>Quincenal</option>
+                    <option value={RecurrenceFrequency.WEEKLY}>Semanal</option>
+                    <option value={RecurrenceFrequency.YEARLY}>Anual</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-stone-600 dark:text-zinc-400 mb-1">
+                    Renovación al Pagar
+                  </label>
+                  <select
+                    value={oblRenewalRule}
+                    onChange={(e) => setOblRenewalRule(e.target.value as RenewalRule)}
+                    className="w-full px-3 py-2 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-xs"
+                  >
+                    <option value={RenewalRule.ONLY_IF_PREVIOUS_PAID}>
+                      Avanzar al siguiente mes al pagar
+                    </option>
+                    <option value={RenewalRule.ASK_BEFORE}>Mantener marcado como pagado</option>
+                    <option value={RenewalRule.AUTO_CREATE}>Renovar automáticamente</option>
+                  </select>
+                </div>
               </div>
 
               <button
                 type="submit"
                 className="w-full py-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-bold"
               >
-                Guardar Obligación
+                {editingObligationId ? 'Guardar Cambios' : 'Guardar Recordatorio de Cuenta'}
               </button>
             </form>
           </div>

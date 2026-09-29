@@ -771,33 +771,73 @@ export function generateAndDownloadPdfReport(input: PdfReportInput): void {
     }
 
     if (sections.obligations) {
-      ensureSpace(8);
+      ensureSpace(10);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.5);
       doc.setTextColor(4, 120, 87);
-      doc.text(`• Pagos Fijos / Obligaciones (${obligations.length}):`, margin, y);
+      doc.text(
+        `• Recordatorios de Cuentas (Monto Variable / Fijo) (${obligations.length}):`,
+        margin,
+        y
+      );
       y += 3.8;
       if (obligations.length === 0) {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(7);
         doc.setTextColor(120, 113, 108);
-        doc.text('Sin pagos fijos registrados.', margin + 4, y);
+        doc.text('Sin recordatorios ni cuentas registradas.', margin + 4, y);
         y += 4.5;
       } else {
         obligations.forEach((o) => {
-          ensureSpace(5);
+          ensureSpace(5.5);
+          const linkedAll = transactions.filter(
+            (t) =>
+              t.linkedObligationId === o.id && t.type === TransactionType.EXPENSE
+          );
+          const linkedRange = linkedAll.filter(
+            (t) => t.date >= startDate && t.date <= endDate
+          );
+          const histVals =
+            linkedAll.length > 0
+              ? linkedAll.map((t) => t.amount)
+              : (o.paymentHistory || []).map((p) => p.amountPaid);
+          const st = calculateStatisticalMetrics(histVals);
+          const paidInRange =
+            linkedRange.length > 0
+              ? linkedRange.reduce((s, t) => s + t.amount, 0)
+              : (o.paymentHistory || [])
+                  .filter((p) => p.date >= startDate && p.date <= endDate)
+                  .reduce((s, p) => s + p.amountPaid, 0);
+          const lastPaid =
+            o.lastPaidAmount ??
+            (linkedAll.length > 0 ? linkedAll[0].amount : 0);
+
+          const typeLabel = o.isVariableAmount
+            ? 'Cuenta Variable'
+            : 'Monto Fijo';
+          const refText =
+            o.amount > 0 ? formatMoney(o.amount, currencySymbol) : 'Variable';
+
           doc.setFont('helvetica', 'normal');
-          doc.setFontSize(7);
+          doc.setFontSize(6.8);
           doc.setTextColor(28, 25, 23);
           doc.text(
-            `${o.name} — Vence: ${o.dueDate} — ${formatMoney(
-              o.amount,
+            `${o.name} [${typeLabel}] — Vence: ${
+              o.dueDate
+            } — Ref: ${refText} | Pagado en rango: ${formatMoney(
+              paidInRange,
               currencySymbol
-            )} (${o.status === 'PAID' ? 'Pagado' : 'Pendiente'})`,
+            )} | Último: ${formatMoney(
+              lastPaid,
+              currencySymbol
+            )} | Prom(μ): ${formatMoney(
+              st.mean,
+              currencySymbol
+            )} (σ: ${formatMoney(st.stdDev, currencySymbol)})`,
             margin + 4,
             y
           );
-          y += 4.2;
+          y += 4.4;
         });
       }
     }
