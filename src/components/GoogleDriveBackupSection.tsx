@@ -84,10 +84,20 @@ export const GoogleDriveBackupSection: React.FC<GoogleDriveBackupSectionProps> =
   const handleLogin = async () => {
     setIsLoading(true);
     setErrorMsg(null);
+    setStatusMsg(null);
     try {
       triggerHaptic(haptic, 15);
       const result = await googleSignIn();
-      if (result) {
+      if (!result || result.cancelled) {
+        setStatusMsg('Inicio de sesión cancelado (se cerró la ventana de Google).');
+        setTimeout(() => setStatusMsg(null), 4000);
+        return;
+      }
+      if (result.errorMessage) {
+        setErrorMsg(result.errorMessage);
+        return;
+      }
+      if (result.user) {
         setUser(result.user);
         setNeedsAuth(false);
         await fetchBackups();
@@ -95,7 +105,7 @@ export const GoogleDriveBackupSection: React.FC<GoogleDriveBackupSectionProps> =
         setTimeout(() => setStatusMsg(null), 3500);
       }
     } catch {
-      setErrorMsg('Error al iniciar sesión con Google. Intenta nuevamente.');
+      setErrorMsg('No se pudo conectar con Google. Intenta nuevamente.');
     } finally {
       setIsLoading(false);
     }

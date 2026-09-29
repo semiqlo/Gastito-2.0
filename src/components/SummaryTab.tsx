@@ -1,30 +1,33 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  Account,
-  AccountTransfer,
   AppDatabaseState,
   Budget,
   BudgetPeriod,
-  Category,
-  DebtRecord,
-  DebtType,
   ObligationStatus,
   RecurrenceFrequency,
   RecurringObligation,
   RenewalRule,
-  Transaction,
   TransactionType,
 } from '../domain/models';
 import {
-  calculateAccountBalance,
   formatMoney,
   triggerHaptic,
 } from '../data/localRepository';
 import { exportToMultiSheetExcel } from '../utils/exportManager';
-import { CategoryIcon, GastitoLogo } from './GastitoLogo';
+import {
+  buildMonthlyComparisonAndTrend,
+  calculateStatisticalMetrics,
+  EconomicIndicatorsData,
+  fetchMindicadorData,
+} from '../utils/economicIndicators';
+import { generateAndDownloadPdfReport } from '../utils/pdfReportGenerator';
+import { AnalyticsChartsAndIndicators } from './AnalyticsChartsAndIndicators';
+import { FormalPdfReportModal } from './FormalPdfReportModal';
+import { CategoryIcon } from './GastitoLogo';
 import {
   AlertTriangle,
   BarChart3,
+  Calendar,
   CalendarClock,
   CheckCircle2,
   Clock,
@@ -33,7 +36,6 @@ import {
   FileText,
   History,
   Plus,
-  Printer,
   RefreshCw,
   ShieldAlert,
   TrendingDown,
@@ -68,8 +70,6 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
     categories,
     accounts,
     transactions,
-    transfers,
-    debts,
     budgets,
     obligations,
     preferences,
@@ -85,6 +85,46 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
     return d.toISOString().split('T')[0];
   });
   const [customEnd, setCustomEnd] = useState<string>(() => new Date().toISOString().split('T')[0]);
+
+  // Categorías seleccionadas con checkbox para incluir/excluir en la estadística
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<Set<string>>(() => {
+    const validIds = categories
+      .filter((c) => !c.isDeleted)
+      .map((c) => c.id);
+    return new Set(validIds);
+  });
+
+  // Sincronizar nuevas categorías si se agregan
+  useEffect(() => {
+    setSelectedCategoryIds((prev) => {
+      const next = new Set(prev);
+      categories.forEach((c) => {
+        if (!c.isDeleted && !next.has(c.id) && prev.size === 0) {
+          next.add(c.id);
+        }
+      });
+      return next;
+    });
+  }, [categories]);
+
+  // Indicadores económicos en tiempo real desde mindicador.cl
+  const [indicators, setIndicators] = useState<EconomicIndicatorsData | null>(null);
+  const [loadingIndicators, setLoadingIndicators] = useState<boolean>(false);
+
+  const loadIndicators = useCallback(async () => {
+    setLoadingIndicators(true);
+    try {
+      const data = await fetchMindicadorData();
+      setIndicators(data);
+    } finally {
+      setLoadingIndicators(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadIndicators();
+  }, [loadIndicators]);
+
   const [selectedStatCatId, setSelectedStatCatId] = useState<string>(
     categories.find((c) => !c.isDeleted)?.id || ''
   );
@@ -113,47 +153,53 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
   );
   const [oblNotify, setOblNotify] = useState(true);
 
-  // Modal Vista Previa PDF Formal
+  // Modal Configurar y Guardar Informe PDF
   const [showPdfPreview, setShowPdfPreview] = useState(false);
-  const [pdfSections, setPdfSections] = useState({
-    summary: true,
-    accounts: true,
-    categories: true,
-    budgets: true,
-    obligations: true,
-    debts: true,
-  });
 
   const catMap = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
   const accMap = useMemo(() => new Map(accounts.map((a) => [a.id, a])), [accounts]);
 
-  // Filtrado de transacciones por período
-  const filteredTransactions = useMemo(() => {
+  // Cálculo explícito del Rango de Fechas activo (startDate y endDate)
+  const activeDateRange = useMemo(() => {
     const today = new Date();
     const todayStr = today.toISOString().split('T')[0];
 
-    return transactions.filter((tx) => {
-      if (periodFilter === 'DAY') {
-        return tx.date === todayStr;
-      }
-      if (periodFilter === 'WEEK') {
-        const weekAgo = new Date();
-        weekAgo.setDate(today.getDate() - 7);
-        const weekAgoStr = weekAgo.toISOString().split('T')[0];
-        return tx.date >= weekAgoStr && tx.date <= todayStr;
-      }
-      if (periodFilter === 'MONTH') {
-        return tx.date.slice(0, 7) === todayStr.slice(0, 7);
-      }
-      if (periodFilter === 'YEAR') {
-        return tx.date.slice(0, 4) === todayStr.slice(0, 4);
-      }
-      if (periodFilter === 'CUSTOM') {
-        return tx.date >= customStart && tx.date <= customEnd;
-      }
-      return true;
-    });
-  }, [transactions, periodFilter, customStart, customEnd]);
+    if (periodFilter === 'DAY') {
+      return { start: todayStr, end: todayStr, label: 'Hoy' };
+    }
+    if (periodFilter === 'WEEK') {
+      const weekAgo = new Date();
+      weekAgo.setDate(today.getDate() - 7);
+      const weekAgoStr = weekAgo.toISOString().split('T')[0];
+      return { start: weekAgoStr, end: todayStr, label: 'Últimos 7 días' };
+    }
+    if (periodFilter === 'MONTH') {
+      const firstOfMonth = `${todayStr.slice(0, 7)}-01`;
+      return { start: firstOfMonth, end: todayStr, label: 'Mes actual' };
+    }
+    if (periodFilter === 'YEAR') {
+      const firstOfYear = `${todayStr.slice(0, 4)}-01-01`;
+      return { start: firstOfYear, end: todayStr, label: 'Año actual' };
+    }
+    return {
+      start: customStart,
+      end: customEnd,
+      label: 'Rango personalizado',
+    };
+  }, [periodFilter, customStart, customEnd]);
+
+  // Filtrado de transacciones por el rango de fechas activo
+  const filteredTransactions = useMemo(() => {
+    return transactions.filter(
+      (tx) => tx.date >= activeDateRange.start && tx.date <= activeDateRange.end
+    );
+  }, [transactions, activeDateRange]);
+
+  const filteredExpenseTransactions = useMemo(
+    () =>
+      filteredTransactions.filter((t) => t.type === TransactionType.EXPENSE),
+    [filteredTransactions]
+  );
 
   const totalIncome = useMemo(
     () =>
@@ -163,37 +209,58 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
     [filteredTransactions]
   );
 
+  // Gastos del período considerando las categorías marcadas en el checkbox
   const totalExpense = useMemo(
     () =>
-      filteredTransactions
-        .filter((t) => t.type === TransactionType.EXPENSE)
+      filteredExpenseTransactions
+        .filter((t) => selectedCategoryIds.has(t.categoryId))
         .reduce((s, t) => s + t.amount, 0),
-    [filteredTransactions]
+    [filteredExpenseTransactions, selectedCategoryIds]
   );
 
   const netBalance = totalIncome - totalExpense;
 
-  // Desglose por categoría
-  const expenseByCategory = useMemo(() => {
-    const map = new Map<string, { category: Category; total: number; count: number }>();
-    filteredTransactions
-      .filter((t) => t.type === TransactionType.EXPENSE)
-      .forEach((tx) => {
-        const cat = catMap.get(tx.categoryId);
-        if (!cat) return;
-        const curr = map.get(cat.id) || { category: cat, total: 0, count: 0 };
-        curr.total += tx.amount;
-        curr.count += 1;
-        map.set(cat.id, curr);
-      });
-    return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [filteredTransactions, catMap]);
+  // Curva comparativa Mes Actual vs Mes Pasado y tendencia de 6 meses
+  const monthlyComparison = useMemo(
+    () => buildMonthlyComparisonAndTrend(transactions, selectedCategoryIds),
+    [transactions, selectedCategoryIds]
+  );
 
-  // Análisis estadístico temporal para la categoría seleccionada
+  const handleToggleCategoryStat = (catId: string) => {
+    setSelectedCategoryIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(catId)) {
+        next.delete(catId);
+      } else {
+        next.add(catId);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllCategories = () => {
+    setSelectedCategoryIds(
+      new Set(categories.filter((c) => !c.isDeleted).map((c) => c.id))
+    );
+  };
+
+  const handleClearAllCategories = () => {
+    setSelectedCategoryIds(new Set());
+  };
+
+  // Análisis estadístico temporal para una categoría individual
   const categoryStats = useMemo(() => {
     const txs = transactions
-      .filter((t) => t.categoryId === selectedStatCatId)
+      .filter(
+        (t) =>
+          t.categoryId === selectedStatCatId &&
+          t.date >= activeDateRange.start &&
+          t.date <= activeDateRange.end
+      )
       .sort((a, b) => a.date.localeCompare(b.date));
+
+    const amounts = txs.map((t) => t.amount);
+    const metrics = calculateStatisticalMetrics(amounts);
 
     if (txs.length === 0) {
       return {
@@ -202,16 +269,11 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         avg: 0,
         min: 0,
         max: 0,
+        stdDev: 0,
         variationPct: 0,
-        trendLabel: 'Sin datos suficientes',
+        trendLabel: 'Sin movimientos en rango ($0)',
       };
     }
-
-    const amounts = txs.map((t) => t.amount);
-    const total = amounts.reduce((s, v) => s + v, 0);
-    const avg = total / amounts.length;
-    const min = Math.min(...amounts);
-    const max = Math.max(...amounts);
 
     let variationPct = 0;
     let trendLabel = 'Estable';
@@ -226,15 +288,67 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
     }
 
     return {
-      count: txs.length,
-      total,
-      avg,
-      min,
-      max,
+      count: metrics.count,
+      total: metrics.sum,
+      avg: metrics.mean,
+      min: metrics.min,
+      max: metrics.max,
+      stdDev: metrics.stdDev,
       variationPct,
       trendLabel,
     };
-  }, [transactions, selectedStatCatId]);
+  }, [transactions, selectedStatCatId, activeDateRange]);
+
+  // Descarga directa de PDF desde cualquier vista con el rango de fechas actual
+  const handleDirectSavePdf = () => {
+    triggerHaptic(hapticEnabled, 20);
+    const expCats = categories.filter(
+      (c) => !c.isDeleted && c.type !== TransactionType.INCOME
+    );
+    const categoryBreakdown = expCats
+      .map((cat) => {
+        const catTxs = filteredExpenseTransactions.filter(
+          (t) => t.categoryId === cat.id
+        );
+        const st = calculateStatisticalMetrics(catTxs.map((t) => t.amount));
+        return {
+          category: cat,
+          total: st.sum,
+          count: st.count,
+          mean: st.mean,
+          stdDev: st.stdDev,
+          cvPct: st.cvPct,
+          isChecked: selectedCategoryIds.has(cat.id),
+        };
+      })
+      .sort((a, b) => {
+        if (b.total !== a.total) return b.total - a.total;
+        return a.category.name.localeCompare(b.category.name);
+      });
+
+    generateAndDownloadPdfReport({
+      dbState,
+      startDate: activeDateRange.start,
+      endDate: activeDateRange.end,
+      periodLabel: activeDateRange.label,
+      totalIncome,
+      totalExpense,
+      netBalance,
+      categoryBreakdown,
+      indicators,
+      monthlyComparison,
+      sections: {
+        summary: true,
+        indicators: true,
+        monthlyTrend: true,
+        categories: true,
+        accounts: true,
+        budgets: true,
+        obligations: true,
+        debts: true,
+      },
+    });
+  };
 
   const handleCreateBudgetSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -362,35 +476,56 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
       {/* SECCIÓN 1: ANÁLISIS Y ESTADÍSTICAS */}
       {activeSubSection === 'ANALYTICS' && (
         <div className="space-y-5">
-          {/* Selector de Período */}
+          {/* Selector de Período y Rango de Fechas + Botón directo Guardar Informe PDF */}
           <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-zinc-500">
-                Período de Análisis
-              </span>
-              <div className="flex gap-1 bg-stone-100 dark:bg-zinc-800 p-1 rounded-xl">
-                {(
-                  [
-                    { id: 'DAY', label: 'Hoy' },
-                    { id: 'WEEK', label: 'Semana' },
-                    { id: 'MONTH', label: 'Mes' },
-                    { id: 'YEAR', label: 'Año' },
-                    { id: 'CUSTOM', label: 'Rango' },
-                  ] as { id: PeriodFilter; label: string }[]
-                ).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setPeriodFilter(item.id)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                      periodFilter === item.id
-                        ? 'bg-emerald-700 text-white shadow-xs'
-                        : 'text-stone-600 dark:text-zinc-400'
-                    }`}
-                  >
-                    {item.label}
-                  </button>
-                ))}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-zinc-500 block">
+                  Período y Rango de Fechas
+                </span>
+                <span className="text-xs font-mono font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1 mt-0.5">
+                  <Calendar className="w-3.5 h-3.5" />
+                  Desde {activeDateRange.start} hasta {activeDateRange.end}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex gap-1 bg-stone-100 dark:bg-zinc-800 p-1 rounded-xl">
+                  {(
+                    [
+                      { id: 'DAY', label: 'Hoy' },
+                      { id: 'WEEK', label: 'Semana' },
+                      { id: 'MONTH', label: 'Mes' },
+                      { id: 'YEAR', label: 'Año' },
+                      { id: 'CUSTOM', label: 'Rango Fechas' },
+                    ] as { id: PeriodFilter; label: string }[]
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setPeriodFilter(item.id)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                        periodFilter === item.id
+                          ? 'bg-emerald-700 text-white shadow-xs'
+                          : 'text-stone-600 dark:text-zinc-400'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic(hapticEnabled, 15);
+                    setShowPdfPreview(true);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-stone-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Guardar Informe PDF
+                </button>
               </div>
             </div>
 
@@ -398,7 +533,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
               <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-stone-100 dark:border-zinc-800">
                 <div>
                   <label className="block text-[11px] font-semibold text-stone-500 mb-1">
-                    Desde
+                    Fecha Desde
                   </label>
                   <input
                     type="date"
@@ -409,7 +544,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-stone-500 mb-1">
-                    Hasta
+                    Fecha Hasta
                   </label>
                   <input
                     type="date"
@@ -424,32 +559,32 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
 
           {/* KPIs principales */}
           <div className="grid grid-cols-3 gap-2.5">
-            <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-3.5">
-              <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 text-[11px] font-bold uppercase">
-                <TrendingUp className="w-3.5 h-3.5" />
-                Ingresos
+            <div className="min-w-0 overflow-hidden bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-3.5">
+              <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 text-[11px] font-bold uppercase truncate">
+                <TrendingUp className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Ingresos</span>
               </div>
-              <p className="text-base sm:text-lg font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-1">
+              <p className="text-sm sm:text-lg font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-1 break-all leading-tight">
                 {formatMoney(totalIncome, currencySymbol)}
               </p>
             </div>
 
-            <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-3.5">
-              <div className="flex items-center gap-1.5 text-rose-600 dark:text-rose-400 text-[11px] font-bold uppercase">
-                <TrendingDown className="w-3.5 h-3.5" />
-                Gastos
+            <div className="min-w-0 overflow-hidden bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-3.5">
+              <div className="flex items-center gap-1.5 text-rose-600 dark:text-rose-400 text-[11px] font-bold uppercase truncate">
+                <TrendingDown className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Gastos</span>
               </div>
-              <p className="text-base sm:text-lg font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-1">
+              <p className="text-sm sm:text-lg font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-1 break-all leading-tight">
                 {formatMoney(totalExpense, currencySymbol)}
               </p>
             </div>
 
-            <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-3.5">
-              <div className="text-stone-400 dark:text-zinc-500 text-[11px] font-bold uppercase">
+            <div className="min-w-0 overflow-hidden bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-3.5">
+              <div className="text-stone-400 dark:text-zinc-500 text-[11px] font-bold uppercase truncate">
                 Balance
               </div>
               <p
-                className={`text-base sm:text-lg font-bold font-mono tabular-nums mt-1 ${
+                className={`text-sm sm:text-lg font-bold font-mono tabular-nums mt-1 break-all leading-tight ${
                   netBalance >= 0
                     ? 'text-emerald-600 dark:text-emerald-400'
                     : 'text-rose-600 dark:text-rose-400'
@@ -461,75 +596,37 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
             </div>
           </div>
 
-          {/* Distribución de Gastos por Categoría (Gráfico Dinámico) */}
-          <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-4 space-y-3.5">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-stone-900 dark:text-zinc-100">
-                Gastos por Categoría
-              </h3>
-              <span className="text-xs font-mono text-stone-500 dark:text-zinc-400">
-                {expenseByCategory.length} categorías activas
-              </span>
-            </div>
+          {/* Indicadores mindicador.cl + Controles Económicos + Gráfico de Líneas + Gráfico de Barras con Checkboxes */}
+          <AnalyticsChartsAndIndicators
+            categories={categories}
+            filteredExpenseTransactions={filteredExpenseTransactions}
+            allTransactions={transactions}
+            selectedCategoryIds={selectedCategoryIds}
+            onToggleCategoryId={handleToggleCategoryStat}
+            onSelectAllCategories={handleSelectAllCategories}
+            onClearAllCategories={handleClearAllCategories}
+            indicators={indicators}
+            loadingIndicators={loadingIndicators}
+            onRefreshIndicators={loadIndicators}
+            monthlyComparison={monthlyComparison}
+            totalIncomePeriod={totalIncome}
+            totalExpensePeriod={totalExpense}
+            startDate={activeDateRange.start}
+            endDate={activeDateRange.end}
+            currencySymbol={currencySymbol}
+            hapticEnabled={hapticEnabled}
+          />
 
-            {expenseByCategory.length === 0 ? (
-              <p className="text-xs text-stone-400 dark:text-zinc-500 py-6 text-center">
-                No hay gastos registrados en el período seleccionado.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {expenseByCategory.map((item) => {
-                  const pct =
-                    totalExpense > 0 ? Math.min(100, (item.total / totalExpense) * 100) : 0;
-                  return (
-                    <div key={item.category.id} className="space-y-1.5">
-                      <div className="flex items-center justify-between text-xs">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="w-6 h-6 rounded-lg flex items-center justify-center text-white"
-                            style={{ backgroundColor: item.category.color }}
-                          >
-                            <CategoryIcon iconName={item.category.icon} className="w-3.5 h-3.5" />
-                          </span>
-                          <span className="font-semibold text-stone-800 dark:text-zinc-200">
-                            {item.category.name}
-                          </span>
-                          <span className="text-[11px] text-stone-400">({item.count})</span>
-                        </div>
-                        <div className="flex items-center gap-2 font-mono tabular-nums">
-                          <span className="font-bold text-stone-900 dark:text-zinc-100">
-                            {formatMoney(item.total, currencySymbol)}
-                          </span>
-                          <span className="text-[11px] text-stone-400 w-10 text-right">
-                            {pct.toFixed(1)}%
-                          </span>
-                        </div>
-                      </div>
-                      <div className="h-2 w-full bg-stone-100 dark:bg-zinc-800 rounded-full overflow-hidden">
-                        <div
-                          className="h-full rounded-full transition-all duration-300"
-                          style={{
-                            width: `${pct}%`,
-                            backgroundColor: item.category.color,
-                          }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Análisis Estadístico Temporal por Categoría */}
+          {/* Análisis Estadístico Temporal por Categoría Individual */}
           <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-4 space-y-3.5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-bold text-stone-900 dark:text-zinc-100">
-                  Análisis Temporal por Categoría
+                  Detalle Estadístico Individual por Categoría ({activeDateRange.start} al{' '}
+                  {activeDateRange.end})
                 </h3>
                 <p className="text-xs text-stone-500 dark:text-zinc-400">
-                  Promedio, mínimo, máximo, variación y tendencia histórica
+                  Promedio, desviación estándar (σ), mínimo, máximo y tendencia en el rango
                 </p>
               </div>
               <select
@@ -547,11 +644,21 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
               </select>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
               <div className="p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60">
-                <span className="text-[11px] text-stone-400 uppercase font-semibold">Promedio</span>
+                <span className="text-[11px] text-stone-400 uppercase font-semibold">
+                  Promedio (μ)
+                </span>
                 <p className="text-sm font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-0.5">
                   {formatMoney(categoryStats.avg, currencySymbol)}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60">
+                <span className="text-[11px] text-stone-400 uppercase font-semibold">
+                  Desv. Estándar (σ)
+                </span>
+                <p className="text-sm font-bold font-mono tabular-nums text-stone-900 dark:text-zinc-100 mt-0.5">
+                  {formatMoney(categoryStats.stdDev, currencySymbol)}
                 </p>
               </div>
               <div className="p-3 rounded-xl bg-stone-50 dark:bg-zinc-800/60">
@@ -754,7 +861,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         </div>
       )}
 
-      {/* SECCIÓN 3: PAGOS FIJOS / RECURRENTES (OBLIGACIONES PENDIENTES VS GASTO PAGADO) */}
+      {/* SECCIÓN 3: PAGOS FIJOS / RECURRENTES */}
       {activeSubSection === 'RECURRING' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -862,7 +969,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         </div>
       )}
 
-      {/* SECCIÓN 4: EXPORTACIÓN A EXCEL (9 HOJAS) Y PDF FORMAL */}
+      {/* SECCIÓN 4: EXPORTACIÓN A EXCEL (9 HOJAS) E INFORME PDF */}
       {activeSubSection === 'EXPORT' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {/* Card Excel Multi-hoja */}
@@ -875,18 +982,20 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                 Exportar a Excel Completo (9 Hojas)
               </h3>
               <p className="text-xs text-stone-500 dark:text-zinc-400 leading-relaxed">
-                Genera un libro Excel con hojas separadas: <strong>Resumen</strong>,{' '}
-                <strong>Movimientos</strong>, <strong>Cuentas</strong>,{' '}
-                <strong>Transferencias</strong>, <strong>Deudas</strong>,{' '}
-                <strong>Presupuestos</strong>, <strong>Pagos recurrentes</strong>,{' '}
-                <strong>Categorías</strong> y <strong>Estadísticas</strong>.
+                Genera un libro Excel personalizado a nombre de{' '}
+                <strong>{preferences.userName?.trim() || 'Usuario Principal'}</strong> con las 9
+                hojas: <strong>Resumen</strong>, <strong>Movimientos</strong>,{' '}
+                <strong>Cuentas</strong>, <strong>Transferencias</strong>,{' '}
+                <strong>Deudas</strong>, <strong>Presupuestos</strong>,{' '}
+                <strong>Pagos recurrentes</strong>, <strong>Categorías</strong> y{' '}
+                <strong>Estadísticas (con σ y CV%)</strong>.
               </p>
             </div>
             <button
               type="button"
               onClick={() => {
                 triggerHaptic(hapticEnabled, 20);
-                exportToMultiSheetExcel(dbState);
+                exportToMultiSheetExcel(dbState, indicators);
               }}
               className="w-full py-3 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs"
             >
@@ -895,32 +1004,42 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
             </button>
           </div>
 
-          {/* Card PDF Formal */}
+          {/* Card Informe PDF */}
           <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-5 flex flex-col justify-between space-y-4">
             <div className="space-y-2">
               <div className="w-11 h-11 rounded-2xl bg-stone-100 dark:bg-zinc-800 text-stone-800 dark:text-zinc-200 flex items-center justify-center">
                 <FileText className="w-6 h-6" />
               </div>
               <h3 className="text-base font-bold text-stone-900 dark:text-zinc-100">
-                Reporte PDF Formal con Logo Gastito
+                Guardar Informe PDF Ordenado
               </h3>
               <p className="text-xs text-stone-500 dark:text-zinc-400 leading-relaxed">
-                Documento ejecutivo con el logo oficial de Gastito (G con doble barra vertical),
-                período filtrado, saldos auditados, gráficos de categorías y secciones
-                seleccionables.
+                Descarga un documento <strong>.PDF</strong> con rango de fechas, gráficos de líneas y
+                barras (incluso si los datos son cero), desviación estándar, controles económicos e
+                indicadores de <strong>mindicador.cl</strong>.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic(hapticEnabled, 20);
-                setShowPdfPreview(true);
-              }}
-              className="w-full py-3 px-4 rounded-xl bg-stone-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-bold flex items-center justify-center gap-2 shadow-xs"
-            >
-              <Printer className="w-4 h-4" />
-              Configurar e Imprimir PDF
-            </button>
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={handleDirectSavePdf}
+                className="w-full py-3 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs"
+              >
+                <Download className="w-4 h-4" />
+                Guardar Informe PDF Directo (.pdf)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(hapticEnabled, 20);
+                  setShowPdfPreview(true);
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-stone-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-bold flex items-center justify-center gap-2 shadow-xs"
+              >
+                <Calendar className="w-4 h-4" />
+                Elegir Rango de Fechas y Guardar PDF
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -969,9 +1088,9 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                   </label>
                   <input
                     type="number"
-                    step="0.01"
+                    step="1"
                     required
-                    placeholder="200.00"
+                    placeholder="200000"
                     value={bgtLimit}
                     onChange={(e) => setBgtLimit(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-sm font-mono"
@@ -1057,9 +1176,9 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                   </label>
                   <input
                     type="number"
-                    step="0.01"
+                    step="1"
                     required
-                    placeholder="0.00"
+                    placeholder="0"
                     value={oblAmount}
                     onChange={(e) => setOblAmount(e.target.value)}
                     className="w-full px-3.5 py-2 rounded-xl bg-stone-50 dark:bg-zinc-800 border border-stone-200 dark:border-zinc-700 text-sm font-mono"
@@ -1143,164 +1262,16 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         </div>
       )}
 
-      {/* MODAL VISTA PREVIA E IMPRESIÓN PDF FORMAL */}
-      {showPdfPreview && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
-          <div className="bg-white text-stone-900 rounded-3xl max-w-3xl w-full p-6 sm:p-8 space-y-6 max-h-[92vh] overflow-y-auto shadow-2xl">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-4 no-print">
-              <div className="flex flex-wrap items-center gap-2">
-                {(
-                  [
-                    { key: 'summary', label: 'Resumen' },
-                    { key: 'accounts', label: 'Cuentas' },
-                    { key: 'categories', label: 'Categorías' },
-                    { key: 'budgets', label: 'Presupuestos' },
-                    { key: 'obligations', label: 'Pagos Fijos' },
-                  ] as { key: keyof typeof pdfSections; label: string }[]
-                ).map((sec) => (
-                  <label
-                    key={sec.key}
-                    className="inline-flex items-center gap-1.5 text-xs font-semibold bg-stone-100 px-2.5 py-1.5 rounded-lg cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={pdfSections[sec.key]}
-                      onChange={(e) =>
-                        setPdfSections((prev) => ({ ...prev, [sec.key]: e.target.checked }))
-                      }
-                    />
-                    {sec.label}
-                  </label>
-                ))}
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => window.print()}
-                  className="px-4 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5"
-                >
-                  <Printer className="w-4 h-4" />
-                  Imprimir / Guardar PDF
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowPdfPreview(false)}
-                  className="p-2 rounded-xl bg-stone-100 text-stone-600"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            {/* Cabecera Formal del Reporte PDF */}
-            <div className="flex items-center justify-between border-b-2 border-emerald-700 pb-4">
-              <div className="flex items-center gap-3">
-                <GastitoLogo size={44} />
-                <div>
-                  <h2 className="text-xl font-bold tracking-tight">
-                    GASTITO 2.0 — Estado Financiero Local
-                  </h2>
-                  <p className="text-xs text-stone-500">
-                    Titular: {preferences.userName || 'Usuario Principal'} · Fecha de emisión:{' '}
-                    {new Date().toISOString().split('T')[0]}
-                  </p>
-                </div>
-              </div>
-              <div className="text-right font-mono text-xs text-stone-500">
-                100% Almacenamiento Local
-              </div>
-            </div>
-
-            {pdfSections.summary && (
-              <div className="grid grid-cols-3 gap-3 bg-stone-50 p-4 rounded-2xl border border-stone-200">
-                <div>
-                  <span className="text-[11px] uppercase text-stone-500 font-bold">
-                    Ingresos del Período
-                  </span>
-                  <p className="text-lg font-bold font-mono text-emerald-700">
-                    {formatMoney(totalIncome, currencySymbol)}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase text-stone-500 font-bold">
-                    Gastos del Período
-                  </span>
-                  <p className="text-lg font-bold font-mono text-rose-700">
-                    {formatMoney(totalExpense, currencySymbol)}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase text-stone-500 font-bold">
-                    Balance Neto
-                  </span>
-                  <p className="text-lg font-bold font-mono text-stone-900">
-                    {formatMoney(netBalance, currencySymbol)}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {pdfSections.accounts && (
-              <div className="space-y-2">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-stone-500">
-                  Saldos por Cuenta
-                </h4>
-                <table className="w-full text-xs border-collapse">
-                  <thead>
-                    <tr className="border-b border-stone-200 text-left text-stone-500">
-                      <th className="py-1.5">Cuenta</th>
-                      <th className="py-1.5">Tipo</th>
-                      <th className="py-1.5 text-right">Saldo Actual</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {accounts.map((acc) => (
-                      <tr key={acc.id} className="border-b border-stone-100">
-                        <td className="py-1.5 font-semibold">{acc.name}</td>
-                        <td className="py-1.5 text-stone-500">{acc.type}</td>
-                        <td className="py-1.5 text-right font-mono font-bold">
-                          {formatMoney(
-                            calculateAccountBalance(acc, transactions, transfers),
-                            currencySymbol
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {pdfSections.categories && expenseByCategory.length > 0 && (
-              <div className="space-y-2">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-stone-500">
-                  Desglose de Gastos por Categoría
-                </h4>
-                <table className="w-full text-xs border-collapse">
-                  <thead>
-                    <tr className="border-b border-stone-200 text-left text-stone-500">
-                      <th className="py-1.5">Categoría</th>
-                      <th className="py-1.5 text-right">Movimientos</th>
-                      <th className="py-1.5 text-right">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {expenseByCategory.map((row) => (
-                      <tr key={row.category.id} className="border-b border-stone-100">
-                        <td className="py-1.5 font-semibold">{row.category.name}</td>
-                        <td className="py-1.5 text-right font-mono">{row.count}</td>
-                        <td className="py-1.5 text-right font-mono font-bold">
-                          {formatMoney(row.total, currencySymbol)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      {/* MODAL CONFIGURAR Y GUARDAR INFORME PDF */}
+      <FormalPdfReportModal
+        isOpen={showPdfPreview}
+        onClose={() => setShowPdfPreview(false)}
+        dbState={dbState}
+        initialStartDate={activeDateRange.start}
+        initialEndDate={activeDateRange.end}
+        selectedCategoryIds={selectedCategoryIds}
+        indicators={indicators}
+      />
     </div>
   );
 };

@@ -123,25 +123,34 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             </h1>
           </div>
 
-          {/* Summary figures with tabular numerals */}
-          <div className="flex flex-wrap items-center gap-6 pt-4 lg:pt-0 border-t lg:border-t-0 border-slate-100 dark:border-slate-800">
-            <div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">Patrimonio en cuentas</div>
-              <div className="text-xl font-bold font-mono-num text-slate-900 dark:text-white">
+          {/* Summary figures: Patrimonio on top, Ingresos & Gastos side-by-side below */}
+          <div className="w-full lg:w-[380px] xl:w-[420px] shrink-0 pt-4 lg:pt-0 border-t lg:border-t-0 border-slate-100 dark:border-slate-800 space-y-2.5">
+            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 min-w-0 overflow-hidden">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Patrimonio en cuentas
+              </div>
+              <div className="text-lg sm:text-xl font-bold font-mono-num text-slate-900 dark:text-white break-all text-right max-w-full">
                 {formatMoney(totalAvailable, preferences.currencySymbol)}
               </div>
             </div>
-            <div className="h-8 w-px bg-slate-200 dark:bg-slate-800 hidden sm:block" />
-            <div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">Ingresos del mes</div>
-              <div className="text-base font-semibold font-mono-num text-emerald-600 dark:text-emerald-400">
-                +{formatMoney(monthIncome, preferences.currencySymbol)}
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="min-w-0 overflow-hidden p-3 rounded-2xl bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200/60 dark:border-emerald-900/40 flex flex-col justify-between">
+                <div className="text-[11px] sm:text-xs font-medium text-slate-500 dark:text-slate-400 truncate">
+                  Ingresos del mes
+                </div>
+                <div className="text-sm sm:text-base font-bold font-mono-num text-emerald-600 dark:text-emerald-400 mt-1 break-all leading-tight">
+                  +{formatMoney(monthIncome, preferences.currencySymbol)}
+                </div>
               </div>
-            </div>
-            <div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">Gastos del mes</div>
-              <div className="text-base font-semibold font-mono-num text-rose-600 dark:text-rose-400">
-                -{formatMoney(monthExpenses, preferences.currencySymbol)}
+
+              <div className="min-w-0 overflow-hidden p-3 rounded-2xl bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200/60 dark:border-rose-900/40 flex flex-col justify-between">
+                <div className="text-[11px] sm:text-xs font-medium text-slate-500 dark:text-slate-400 truncate">
+                  Gastos del mes
+                </div>
+                <div className="text-sm sm:text-base font-bold font-mono-num text-rose-600 dark:text-rose-400 mt-1 break-all leading-tight">
+                  -{formatMoney(monthExpenses, preferences.currencySymbol)}
+                </div>
               </div>
             </div>
           </div>

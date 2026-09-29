@@ -97,12 +97,12 @@ export function exportToMultiSheetExcel(
     ['Usuario Titular (Configuración)', configuredUserName, ''],
     ['Asistente Financiero', preferences.assistantName || 'Gastito', ''],
     ['Fecha de Exportación', new Date().toISOString().split('T')[0], ''],
-    ['Total Ingresos', Number(totalIncome.toFixed(2)), preferences.currencySymbol],
-    ['Total Gastos', Number(totalExpense.toFixed(2)), preferences.currencySymbol],
-    ['Balance Neto del Período', Number(netBalance.toFixed(2)), preferences.currencySymbol],
+    ['Total Ingresos', Math.round(totalIncome), preferences.currencySymbol],
+    ['Total Gastos', Math.round(totalExpense), preferences.currencySymbol],
+    ['Balance Neto del Período', Math.round(netBalance), preferences.currencySymbol],
     [
       'Desviación Estándar de Gastos (σ)',
-      globalExpenseStats.stdDev,
+      Math.round(globalExpenseStats.stdDev),
       preferences.currencySymbol,
     ],
     [

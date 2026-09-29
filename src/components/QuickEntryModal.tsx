@@ -135,15 +135,11 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
       setAmountStr('');
       return;
     }
-    if (key === '.') {
-      if (amountStr.includes('.')) return;
-      setAmountStr((prev) => (prev === '' ? '0.' : prev + '.'));
+    if (key === '000') {
+      setAmountStr((prev) => (prev === '' || prev === '0' ? '' : (prev + '000').slice(0, 12)));
       return;
     }
-    // Max 2 decimal places
-    const parts = amountStr.split('.');
-    if (parts[1] && parts[1].length >= 2) return;
-    if (amountStr.length >= 10) return;
+    if (amountStr.length >= 12) return;
 
     setAmountStr((prev) => (prev === '0' ? key : prev + key));
   };
@@ -172,7 +168,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
         {
           fromAccountId: selectedAccountId,
           toAccountId,
-          amount: Number(numericAmount.toFixed(2)),
+          amount: Math.round(numericAmount),
           date: date || todayStr,
           description: description.trim(),
         },
@@ -196,7 +192,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
       {
         type: mode === 'EXPENSE' ? TransactionType.EXPENSE : TransactionType.INCOME,
         categoryId: selectedCategoryId,
-        amount: Number(numericAmount.toFixed(2)),
+        amount: Math.round(numericAmount),
         accountId: selectedAccountId,
         date: date || todayStr,
         description: description.trim(),
@@ -361,15 +357,15 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                   <span className="text-2xl font-mono-num text-slate-400">{currencySymbol}</span>
                   <input
                     type="number"
-                    inputMode="decimal"
-                    step="0.01"
+                    inputMode="numeric"
+                    step="1"
                     min="0"
                     value={amountStr}
                     onChange={(e) => {
                       setErrorMsg('');
-                      setAmountStr(e.target.value);
+                      setAmountStr(e.target.value.replace(/[^0-9]/g, ''));
                     }}
-                    placeholder="0.00"
+                    placeholder="0"
                     className="w-full bg-transparent text-right text-3xl sm:text-4xl font-bold font-mono-num text-white focus:outline-none"
                     autoFocus
                   />
@@ -378,7 +374,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
 
               {/* Tactile Number Pad for 1-Handed Speed */}
               <div className="grid grid-cols-4 gap-2">
-                {['1', '2', '3', 'CLEAR', '4', '5', '6', 'BACK', '7', '8', '9', '.', '0', '00'].map(
+                {['1', '2', '3', 'CLEAR', '4', '5', '6', 'BACK', '7', '8', '9', '000', '0', '00'].map(
                   (key) => (
                     <button
                       key={key}

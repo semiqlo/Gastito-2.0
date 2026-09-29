@@ -198,7 +198,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
               </label>
               <input
                 type="number"
-                step="0.01"
+                step="1"
                 value={initialBalance}
                 onChange={(e) => setInitialBalance(e.target.value)}
                 className="w-full h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-mono-num text-slate-900 dark:text-white"

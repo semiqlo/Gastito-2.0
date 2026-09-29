@@ -1,5 +1,5 @@
 import React from 'react';
-import { Category, Transaction } from '../domain/models';
+import { Category, Transaction, TransactionType } from '../domain/models';
 import { formatMoney, triggerHaptic } from '../data/localRepository';
 import {
   calculateStatisticalMetrics,
@@ -11,6 +11,7 @@ import { CategoryIcon } from './GastitoLogo';
 import {
   Activity,
   BarChart3,
+  Calendar,
   CheckSquare,
   Globe,
   RefreshCw,
@@ -46,6 +47,8 @@ interface AnalyticsChartsAndIndicatorsProps {
   };
   totalIncomePeriod: number;
   totalExpensePeriod: number;
+  startDate: string;
+  endDate: string;
   currencySymbol: string;
   hapticEnabled: boolean;
 }
@@ -64,10 +67,14 @@ export const AnalyticsChartsAndIndicators: React.FC<
   onRefreshIndicators,
   monthlyComparison,
   totalIncomePeriod,
+  startDate,
+  endDate,
   currencySymbol,
   hapticEnabled,
 }) => {
-  const expenseCategories = categories.filter((c) => !c.isDeleted);
+  const expenseCategories = categories.filter(
+    (c) => !c.isDeleted && c.type !== TransactionType.INCOME
+  );
 
   // Filtrar los gastos del período únicamente por las categorías con checkbox activo
   const activeSelectedExpenses = filteredExpenseTransactions.filter((t) =>
@@ -88,7 +95,7 @@ export const AnalyticsChartsAndIndicators: React.FC<
       ? ((totalIncomePeriod - selectedTotalExpense) / totalIncomePeriod) * 100
       : 0;
 
-  // Agrupación para el Gráfico de Barras por Categoría
+  // Agrupación para el Gráfico de Barras por Categoría (incluye categorías en $0.00)
   const categoryBarData = expenseCategories
     .map((cat) => {
       const catTxs = filteredExpenseTransactions.filter(
@@ -106,29 +113,35 @@ export const AnalyticsChartsAndIndicators: React.FC<
         mean: stats.mean,
       };
     })
-    .filter((item) => item.total > 0 || item.isChecked)
-    .sort((a, b) => b.total - a.total);
+    .sort((a, b) => {
+      if (b.total !== a.total) return b.total - a.total;
+      return a.category.name.localeCompare(b.category.name);
+    });
+
+  const checkedBarItems = categoryBarData.filter((d) => d.isChecked);
+  const visibleBarChartItems =
+    checkedBarItems.length > 0 ? checkedBarItems : categoryBarData;
 
   const maxBarValue = Math.max(
-    1,
-    ...categoryBarData.filter((d) => d.isChecked).map((d) => d.total)
+    0,
+    ...visibleBarChartItems.map((d) => d.total)
   );
 
   // Coordenadas para el Gráfico de Líneas SVG (Gasto Actual vs Mes Pasado)
   const pts = monthlyComparison.comparisonPoints;
-  const maxLineVal = Math.max(
-    100,
+  const rawMaxLine = Math.max(
     ...pts.map((p) =>
       Math.max(p.currentMonthCumulative, p.previousMonthCumulative)
     ),
     monthlyComparison.monthlyMean + monthlyComparison.monthlyStdDev
   );
+  const maxLineVal = rawMaxLine > 0 ? rawMaxLine * 1.15 : 100;
 
   const chartW = 600;
   const chartH = 210;
-  const padLeft = 52;
+  const padLeft = 54;
   const padRight = 24;
-  const padTop = 22;
+  const padTop = 24;
   const padBottom = 34;
   const plotW = chartW - padLeft - padRight;
   const plotH = chartH - padTop - padBottom;
@@ -155,9 +168,9 @@ export const AnalyticsChartsAndIndicators: React.FC<
 
   const formatClpIndicator = (val?: number) => {
     if (val === undefined || val === null) return '---';
-    return `$${val.toLocaleString('es-CL', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
+    return `$${Math.round(val).toLocaleString('es-CL', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
     })}`;
   };
 
@@ -263,16 +276,20 @@ export const AnalyticsChartsAndIndicators: React.FC<
 
       {/* 2. CONTROLES ECONÓMICOS Y DESVIACIÓN ESTÁNDAR */}
       <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-emerald-600" />
             <h3 className="text-sm font-bold text-stone-900 dark:text-zinc-100">
               Controles Económicos y Estadísticos (Categorías Seleccionadas)
             </h3>
           </div>
-          <span className="text-[11px] font-mono text-stone-400">
-            n = {selectedStats.count} mov.
-          </span>
+          <div className="flex items-center gap-2 text-[11px] font-mono text-stone-500 dark:text-zinc-400">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-stone-100 dark:bg-zinc-800">
+              <Calendar className="w-3 h-3 text-emerald-600" />
+              {startDate} al {endDate}
+            </span>
+            <span>n = {selectedStats.count} mov.</span>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
@@ -320,7 +337,7 @@ export const AnalyticsChartsAndIndicators: React.FC<
               {selectedStats.cvPct.toFixed(1)}%
             </p>
             <span className="text-[10px] text-stone-400">
-              {selectedStats.cvPct < 35 ? 'Dispersión baja' : 'Dispersión alta'}
+              {selectedStats.cvPct < 35 ? 'Dispersión controlada' : 'Dispersión alta'}
             </span>
           </div>
 
@@ -377,7 +394,7 @@ export const AnalyticsChartsAndIndicators: React.FC<
               {monthlyComparison.previousMonthLabel})
             </h3>
             <p className="text-xs text-stone-500 dark:text-zinc-400">
-              Curva comparativa con porcentajes por tramo, media mensual (μ) y banda de desviación estándar (±1σ)
+              Rango activo: <strong>{startDate}</strong> al <strong>{endDate}</strong> · Porcentajes por tramo, media mensual (μ) y desviación estándar (±1σ)
             </p>
           </div>
 
@@ -393,7 +410,7 @@ export const AnalyticsChartsAndIndicators: React.FC<
           </div>
         </div>
 
-        {/* SVG Line Chart */}
+        {/* SVG Line Chart (Siempre visible incluso con datos en 0) */}
         <div className="w-full overflow-x-auto">
           <svg
             viewBox={`0 0 ${chartW} ${chartH}`}
@@ -436,7 +453,7 @@ export const AnalyticsChartsAndIndicators: React.FC<
             {/* Guías horizontales */}
             {[0, 0.5, 1].map((ratio, idx) => {
               const yPos = padTop + plotH * (1 - ratio);
-              const val = maxLineVal * ratio;
+              const val = rawMaxLine > 0 ? maxLineVal * ratio : 0;
               return (
                 <g key={idx}>
                   <line
@@ -555,18 +572,18 @@ export const AnalyticsChartsAndIndicators: React.FC<
         </div>
       </div>
 
-      {/* 4. GRÁFICO DE BARRAS CON CHECKBOXES PARA INCLUIR / EXCLUIR CATEGORÍAS */}
+      {/* 4. GRÁFICO DE BARRAS CON CHECKBOXES PARA INCLUIR / EXCLUIR CATEGORÍAS (SIEMPRE VISIBLE INCLUSO EN 0) */}
       <div className="bg-white dark:bg-zinc-900 border border-stone-200/80 dark:border-zinc-800 rounded-2xl p-4 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
               <BarChart3 className="w-4 h-4 text-emerald-600" />
               <h3 className="text-sm font-bold text-stone-900 dark:text-zinc-100">
-                Gráfico de Barras por Categoría de Gasto (Interactivo)
+                Gráfico de Barras por Categoría de Gasto ({startDate} al {endDate})
               </h3>
             </div>
             <p className="text-xs text-stone-500 dark:text-zinc-400">
-              Marca o desmarca las casillas para incluir o excluir categorías en la estadística y en el gráfico
+              Marca o desmarca las casillas para incluir o excluir categorías en la estadística y en el informe PDF
             </p>
           </div>
 
@@ -594,50 +611,47 @@ export const AnalyticsChartsAndIndicators: React.FC<
           </div>
         </div>
 
-        {/* Gráfico de Barras Visual (Verticales proporcionales + Ranking) */}
-        {categoryBarData.filter((d) => d.isChecked && d.total > 0).length > 0 && (
-          <div className="p-4 rounded-2xl bg-stone-50 dark:bg-zinc-800/40 border border-stone-200/60 dark:border-zinc-800">
-            <div className="flex items-end gap-3 h-44 overflow-x-auto pb-2 pt-6 px-2">
-              {categoryBarData
-                .filter((d) => d.isChecked && d.total > 0)
-                .map((item) => {
-                  const heightPct = Math.max(
-                    8,
-                    (item.total / maxBarValue) * 100
-                  );
-                  const sharePct =
-                    selectedTotalExpense > 0
-                      ? (item.total / selectedTotalExpense) * 100
-                      : 0;
-                  return (
+        {/* Gráfico de Barras Visual (Siempre renderizado aunque los valores sean 0) */}
+        <div className="p-4 rounded-2xl bg-stone-50 dark:bg-zinc-800/40 border border-stone-200/60 dark:border-zinc-800">
+          <div className="flex items-end gap-3 h-44 overflow-x-auto pb-2 pt-6 px-2">
+            {visibleBarChartItems.map((item) => {
+              const heightPct =
+                maxBarValue > 0 && item.total > 0
+                  ? Math.max(8, (item.total / maxBarValue) * 100)
+                  : 4;
+              const sharePct =
+                selectedTotalExpense > 0 && item.isChecked
+                  ? (item.total / selectedTotalExpense) * 100
+                  : 0;
+              return (
+                <div
+                  key={item.category.id}
+                  className="flex flex-col items-center justify-end h-full min-w-[68px] flex-1 group"
+                >
+                  <span className="text-[10px] font-mono font-bold text-stone-700 dark:text-zinc-200 mb-1">
+                    {sharePct.toFixed(1)}%
+                  </span>
+                  <div className="w-full max-w-[44px] bg-stone-200/70 dark:bg-zinc-800 rounded-t-xl flex items-end h-28 overflow-hidden border-b border-stone-300 dark:border-zinc-700">
                     <div
-                      key={item.category.id}
-                      className="flex flex-col items-center justify-end h-full min-w-[68px] flex-1 group"
-                    >
-                      <span className="text-[10px] font-mono font-bold text-stone-700 dark:text-zinc-200 mb-1">
-                        {sharePct.toFixed(1)}%
-                      </span>
-                      <div className="w-full max-w-[44px] bg-stone-200/70 dark:bg-zinc-800 rounded-t-xl flex items-end h-28 overflow-hidden">
-                        <div
-                          className="w-full rounded-t-xl transition-all duration-300"
-                          style={{
-                            height: `${heightPct}%`,
-                            backgroundColor: item.category.color,
-                          }}
-                        />
-                      </div>
-                      <span className="text-[10px] font-semibold text-stone-700 dark:text-zinc-300 mt-1.5 truncate max-w-[72px] text-center">
-                        {item.category.name}
-                      </span>
-                      <span className="text-[10px] font-mono text-stone-500 dark:text-zinc-400">
-                        {formatMoney(item.total, currencySymbol)}
-                      </span>
-                    </div>
-                  );
-                })}
-            </div>
+                      className="w-full rounded-t-xl transition-all duration-300"
+                      style={{
+                        height: `${heightPct}%`,
+                        backgroundColor: item.category.color,
+                        opacity: item.total > 0 ? 1 : 0.45,
+                      }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-semibold text-stone-700 dark:text-zinc-300 mt-1.5 truncate max-w-[76px] text-center">
+                    {item.category.name}
+                  </span>
+                  <span className="text-[10px] font-mono text-stone-500 dark:text-zinc-400">
+                    {formatMoney(item.total, currencySymbol)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
-        )}
+        </div>
 
         {/* Lista de Categorías con Checkboxes para activar/desactivar en la estadística */}
         <div className="space-y-2">

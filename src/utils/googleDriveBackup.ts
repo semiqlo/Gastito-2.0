@@ -16,6 +16,7 @@ const auth = getAuth(app);
 
 const provider = new GoogleAuthProvider();
 SCOPES.forEach((scope) => provider.addScope(scope));
+provider.setCustomParameters({ prompt: 'select_account' });
 
 // Flag to indicate if we are in the middle of a sign-in flow.
 let isSigningIn = false;
@@ -42,22 +43,41 @@ export const initGoogleAuth = (
 };
 
 export const googleSignIn = async (): Promise<{
-  user: User;
-  accessToken: string;
+  user?: User;
+  accessToken?: string;
+  cancelled?: boolean;
+  errorMessage?: string;
 } | null> => {
   try {
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
-      throw new Error('No se pudo obtener el token de acceso de Google Drive.');
+      return {
+        errorMessage: 'No se pudo obtener el permiso de acceso a Google Drive.',
+      };
     }
 
     cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken };
-  } catch (error) {
-    console.error('Error al iniciar sesión con Google:', error);
-    throw error;
+  } catch (error: any) {
+    const code = error?.code || '';
+    if (
+      code === 'auth/popup-closed-by-user' ||
+      code === 'auth/cancelled-popup-request'
+    ) {
+      return { cancelled: true };
+    }
+    if (code === 'auth/popup-blocked') {
+      return {
+        errorMessage:
+          'El navegador bloqueó la ventana emergente de Google. Permite las ventanas emergentes e intenta nuevamente.',
+      };
+    }
+    return {
+      errorMessage:
+        'No se pudo completar el inicio de sesión con Google. Verifica que las ventanas emergentes estén permitidas.',
+    };
   } finally {
     isSigningIn = false;
   }

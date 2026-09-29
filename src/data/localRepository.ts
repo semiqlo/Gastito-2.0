@@ -397,7 +397,7 @@ export function calculateAccountBalance(
     }
   }
 
-  return Number(balance.toFixed(2));
+  return Math.round(balance);
 }
 
 export function triggerHaptic(enabled: boolean, pattern: number | number[] = 15): void {
@@ -413,10 +413,10 @@ export function triggerHaptic(enabled: boolean, pattern: number | number[] = 15)
 
 export function formatMoney(amount: number, symbol = '$'): string {
   const isNegative = amount < 0;
-  const absVal = Math.abs(amount);
-  const formatted = absVal.toLocaleString('es-MX', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+  const absVal = Math.round(Math.abs(amount));
+  const formatted = absVal.toLocaleString('es-CL', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   });
   return `${isNegative ? '-' : ''}${symbol}${formatted}`;
 }
@@ -436,22 +436,24 @@ export function calculateDebtSimplification(
     return { totalExpense: 0, equalShare: 0, settlements: [] };
   }
 
-  const totalExpense = valid.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
-  const equalShare = totalExpense / valid.length;
+  const totalExpense = Math.round(
+    valid.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0)
+  );
+  const equalShare = Math.round(totalExpense / valid.length);
 
   // Balance neto: positivo = le deben dinero, negativo = debe dinero
   const balances = valid.map((p) => ({
     name: p.name.trim(),
-    net: Number((p.amountPaid - (p.customShare ?? equalShare)).toFixed(2)),
+    net: Math.round(p.amountPaid - (p.customShare ?? equalShare)),
   }));
 
   const debtors = balances
-    .filter((b) => b.net < -0.01)
+    .filter((b) => b.net < 0)
     .map((b) => ({ name: b.name, amount: Math.abs(b.net) }))
     .sort((a, b) => b.amount - a.amount);
 
   const creditors = balances
-    .filter((b) => b.net > 0.01)
+    .filter((b) => b.net > 0)
     .map((b) => ({ name: b.name, amount: b.net }))
     .sort((a, b) => b.amount - a.amount);
 
@@ -462,9 +464,9 @@ export function calculateDebtSimplification(
   while (i < debtors.length && j < creditors.length) {
     const debtor = debtors[i];
     const creditor = creditors[j];
-    const settledAmount = Number(Math.min(debtor.amount, creditor.amount).toFixed(2));
+    const settledAmount = Math.round(Math.min(debtor.amount, creditor.amount));
 
-    if (settledAmount > 0.01) {
+    if (settledAmount > 0) {
       settlements.push({
         from: debtor.name,
         to: creditor.name,
@@ -472,16 +474,16 @@ export function calculateDebtSimplification(
       });
     }
 
-    debtor.amount = Number((debtor.amount - settledAmount).toFixed(2));
-    creditor.amount = Number((creditor.amount - settledAmount).toFixed(2));
+    debtor.amount = Math.round(debtor.amount - settledAmount);
+    creditor.amount = Math.round(creditor.amount - settledAmount);
 
-    if (debtor.amount <= 0.01) i++;
-    if (creditor.amount <= 0.01) j++;
+    if (debtor.amount <= 0) i++;
+    if (creditor.amount <= 0) j++;
   }
 
   return {
-    totalExpense: Number(totalExpense.toFixed(2)),
-    equalShare: Number(equalShare.toFixed(2)),
+    totalExpense,
+    equalShare,
     settlements,
   };
 }
